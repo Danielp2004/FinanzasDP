@@ -1,0 +1,2475 @@
+<script>
+/**
+ * FINANZAS AI PRO — app.html
+ * Frontend JS — Navegación · Charts · Formularios · Exports
+ * v2.0
+ */
+
+// ═══════════════════════════════════════════════════════
+// GLOBALS
+// ═══════════════════════════════════════════════════════
+const $ = id => document.getElementById(id);
+const COP = new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 });
+
+let _data = null;
+let _emailLogs = [];
+let _emailFilter = 'all';
+let _trendMode = 'mix';
+let _charts = {};
+const PALETTE = ['#00d4aa','#3b82f6','#8b5cf6','#f5a623','#ff4d6d','#22c55e','#06b6d4','#ec4899','#84cc16','#f97316'];
+
+// Chart.js defaults — dark theme
+Chart.defaults.color = '#64748b';
+Chart.defaults.borderColor = 'rgba(255,255,255,0.06)';
+Chart.defaults.font.family = 'Outfit, sans-serif';
+
+// ═══════════════════════════════════════════════════════
+// TEMA CLARO/OSCURO
+// ═══════════════════════════════════════════════════════
+function toggleTheme() {
+  const body = document.body;
+  const toggle = $('themeToggle');
+  const icon = toggle.querySelector('i');
+
+  if (body.classList.contains('light-theme')) {
+    body.classList.remove('light-theme');
+    icon.className = 'fas fa-moon';
+    localStorage.setItem('theme', 'dark');
+  } else {
+    body.classList.add('light-theme');
+    icon.className = 'fas fa-sun';
+    localStorage.setItem('theme', 'light');
+  }
+
+  // Re-render charts with new theme
+  if (_data) buildCharts(_data);
+}
+
+// Load theme on init
+window.onload = () => {
+  const savedTheme = localStorage.getItem('theme') || 'dark';
+  if (savedTheme === 'light') {
+    document.body.classList.add('light-theme');
+    $('themeToggle').querySelector('i').className = 'fas fa-sun';
+  }
+
+  const hoy = new Date();
+  $('filtroMes').value = hoy.toISOString().slice(0, 7);
+  $('pageDate').textContent = hoy.toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  $('txnDate').value = hoy.toISOString().slice(0, 10);
+  loadPrecioMode();
+  refreshData();
+};
+
+// ═══════════════════════════════════════════════════════
+// NAVEGACIÓN
+// ═══════════════════════════════════════════════════════
+const PAGE_TITLES = {
+  dashboard: 'Dashboard', movimientos: 'Movimientos',
+  presupuesto: 'Presupuesto', cuentas: 'Cuentas',
+  inversiones: 'Inversiones', emails: 'Emails',
+  configuracion: 'Configuración'
+};
+
+function navTo(pageId, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+
+  const page = $('page-' + pageId);
+  if (page) page.classList.add('active');
+
+  if (el) el.classList.add('active');
+  else {
+    const navEl = document.querySelector(`[data-page="${pageId}"]`);
+    if (navEl) navEl.classList.add('active');
+  }
+
+  $('pageTitle').textContent = PAGE_TITLES[pageId] || pageId;
+
+  // Acciones especiales por página
+  if (pageId === 'emails') { loadEmailLogs(); }
+  if (pageId === 'movimientos') renderMovimientos();
+  if (pageId === 'configuracion') loadConfigPage();
+
+  closeSidebar();
+}
+
+function toggleSidebar() {
+  $('sidebar').classList.toggle('open');
+  $('sidebarOverlay').classList.toggle('show');
+}
+
+function closeSidebar() {
+  $('sidebar').classList.remove('open');
+  $('sidebarOverlay').classList.remove('show');
+}
+
+// ═══════════════════════════════════════════════════════
+// DATA LOAD
+// ═══════════════════════════════════════════════════════
+function refreshData(mes) {
+  const mesVal = mes || $('filtroMes').value;
+  $('loader').classList.remove('hidden');
+  google.script.run
+    .withSuccessHandler(d => { $('loader').classList.add('hidden'); renderAll(d); })
+    .withFailureHandler(e => { $('loader').classList.add('hidden'); toast('Error cargando datos: ' + e.message, 'error'); })
+    .getDataAPI(mesVal);
+}
+
+// ═══════════════════════════════════════════════════════
+// RENDER ALL
+// ═══════════════════════════════════════════════════════
+function renderAll(d) {
+  if (d.error) { toast(d.error, 'error'); return; }
+  _data = d;
+
+  // KPIs
+  setText('kpi-neto',     COP.format(d.kpis.totalNeto   || 0));
+  setText('kpi-income',   COP.format(d.kpis.income      || 0));
+  setText('kpi-expense',  COP.format(d.kpis.expense     || 0));
+  setText('kpi-savings',  COP.format(d.kpis.savings     || 0));
+  setText('kpi-burn',     (d.kpis.burnRate || 0).toFixed(1) + '%');
+  setText('kpi-inv',      COP.format(d.kpis.inversiones || 0));
+  setText('kpi-efec',     COP.format(d.kpis.efectivo    || 0));
+  setText('kpi-cuentas-n',d.accounts?.length || 0);
+  setText('invTotal',     COP.format(d.kpis.inversiones || 0));
+  setText('invPositions', d.inversiones?.length || 0);
+
+  // Email badge
+  if (d.emailPending > 0) {
+    const badge = $('emailBadge');
+    badge.textContent = d.emailPending;
+    badge.style.display = 'inline-block';
+  } else {
+    $('emailBadge').style.display = 'none';
+  }
+
+  // Llenar selects
+  const cats = (d.combos?.categorias  || []).filter(c => !c.includes('↔'));
+  const cts = d.combos?.cuentas || [];
+  fillSelect('selCat',    cats);
+  fillSelect('selCuenta', cts);
+  fillSelect('selDest',   cts);
+  // Llenar selects de modales de edición
+  fillSelect('emailEditCat', cats);
+  fillSelect('emailEditAccount', cts);
+  fillSelect('editTxnCat', cats);
+  fillSelect('editTxnCuenta', cts);
+  fillSelect('eventCat', cats);
+
+  // Top gastos
+  renderTopGastos(d.topGastos || []);
+
+  // Transacciones recientes en dashboard
+  renderRecentTxns(d.historial?.slice(0, 8) || []);
+
+  // Cuentas
+  renderAccounts(d.accounts || []);
+
+  // Inversiones
+  // Inversiones (Portfolio Manager)
+  renderInversiones(d.inversiones || [], d.invPorTipo || [], d.invPorBroker || []);
+
+  // Presupuesto
+  renderPresupuesto(d.budget || {});
+  renderBudgetTemplateEditor(d.budget || {});
+  renderPeriodSummaries(d.summary || {});
+
+  renderWorkspaceSummary(d);
+
+  // Charts (always build for mes view; other views render on tab click)
+  buildCharts(d);
+
+  // If a non-default period is active, re-render it with new data
+  if (_periodView === 'semana')   renderWeekView(d);
+  if (_periodView === 'año')      renderYearView(d);
+  if (_periodView === 'comparar') renderCompareView(d);
+
+  // Re-render movimientos if that page is active
+  if ($('page-movimientos')?.classList.contains('active')) renderMovimientos();
+}
+
+function renderWorkspaceSummary(d) {
+  const month = d.mes || $('filtroMes')?.value || '';
+  const [year, monthNum] = String(month).split('-').map(Number);
+  const monthDate = year && monthNum ? new Date(year, monthNum - 1, 1) : null;
+  const prettyMonth = monthDate
+    ? monthDate.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' })
+    : month;
+  const saas = d.saas || {};
+  const healthScore = Number(saas.healthScore || 0);
+  const budgetPct = Number(saas.budgetUsagePct || 0);
+  const runway = saas.runwayMonths == null ? 'Sin gasto' : `${saas.runwayMonths.toFixed(1)} meses`;
+
+  setText('heroMonthLabel', prettyMonth ? prettyMonth.replace(/^\w/, c => c.toUpperCase()) : '-');
+  setText('saasRunway', runway);
+  setText('saasSetupProgress', `${Math.round(saas.setupProgress || 0)}%`);
+  setText('saasHealthScore', String(Math.round(healthScore)));
+  setText('saasHealthText', `${saas.healthLabel || 'Sin clasificar'}${saas.healthTips?.[0] ? ` · ${saas.healthTips[0]}` : ''}`);
+  setText('saasBudgetStatus', `${budgetPct.toFixed(0)}%`);
+  setText('saasInboxStatus', String(d.emailPending || 0));
+
+  const setupBar = $('saasSetupBar');
+  if (setupBar) setupBar.style.width = `${Math.max(0, Math.min(100, Number(saas.setupProgress || 0)))}%`;
+
+  const checklist = $('saasChecklist');
+  if (checklist) {
+    checklist.innerHTML = (saas.setupItems || []).map(item => `
+      <div class="saas-check ${item.ready ? 'ready' : 'pending'}">
+        <div class="saas-check-left">
+          <i class="fas ${item.ready ? 'fa-circle-check' : 'fa-circle'}"></i>
+          <span>${esc(item.label)}</span>
+        </div>
+        <span class="saas-check-state">${item.ready ? 'Listo' : 'Pendiente'}</span>
+      </div>
+    `).join('') || '<div class="empty-state"><p>Sin checklist disponible</p></div>';
+  }
+
+  const alerts = $('saasAlerts');
+  if (alerts) {
+    alerts.innerHTML = (saas.alerts || []).map(alert => `
+      <div class="saas-list-item ${esc(alert.level || 'success')}">
+        <i class="fas ${alert.level === 'danger' ? 'fa-triangle-exclamation' : alert.level === 'warning' ? 'fa-bell' : 'fa-circle-check'}"></i>
+        <div>${esc(alert.text || '')}</div>
+      </div>
+    `).join('');
+  }
+
+  // Inbox alert badge en el header compacto
+  const alertBadge = $('alertBadge');
+  if (alertBadge) {
+    const pending = d.emailPending || 0;
+    alertBadge.style.display = pending > 0 ? 'flex' : 'none';
+    setText('saasInboxStatus', String(pending));
+  }
+
+  // Re-apply period view if changed
+  if (_periodView !== 'mes') {
+    const activeTab = $('ptab-' + _periodView);
+    setPeriodView(_periodView, activeTab);
+  }
+}
+
+function renderPeriodSummaries(summary) {
+  const render = (id, data, label) => {
+    const el = $(id);
+    if (!el) return;
+    const income = Number(data?.income || 0);
+    const expense = Number(data?.expense || 0);
+    const net = Number(data?.net || 0);
+    const transfer = Number(data?.transfer || 0);
+    const count = Number(data?.count || 0);
+    el.innerHTML = `
+      <div style="display:grid;gap:10px">
+        <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px">
+          <span>Ingresos</span><strong class="mono" style="color:var(--emerald)">${COP.format(income)}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px">
+          <span>Gastos</span><strong class="mono" style="color:var(--red)">${COP.format(expense)}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px">
+          <span>Neto</span><strong class="mono" style="color:${net >= 0 ? 'var(--emerald)' : 'var(--red)'}">${COP.format(net)}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px">
+          <span>Transferencias</span><strong class="mono">${COP.format(transfer)}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--text-muted)">
+          <span>${label}</span><strong class="mono">${count} movimientos</strong>
+        </div>
+      </div>
+    `;
+  };
+  render('summaryWeek', summary.week || {}, 'Últimos 7 días');
+  render('summaryMonth', summary.month || {}, 'Mes filtrado');
+  render('summaryYear', summary.year || {}, 'Año filtrado');
+}
+
+// ═══════════════════════════════════════════════════════
+// CHARTS
+// ═══════════════════════════════════════════════════════
+function buildCharts(d) {
+  destroyAll();
+
+  // ── Trend 12 meses
+  const sm = d.series?.monthly || {};
+  const trendDatasets = _trendMode === 'savings'
+    ? [{ label: 'Ahorro', data: sm.savings||[], borderColor: '#00d4aa', backgroundColor: 'rgba(0,212,170,.08)', fill:true, tension:.4, pointRadius:3 }]
+    : [
+        { label:'Ingresos', data: sm.income ||[], borderColor:'#00d4aa', backgroundColor:'rgba(0,212,170,.05)', fill:false, tension:.4, pointRadius:3 },
+        { label:'Gastos',   data: sm.expense||[], borderColor:'#ff4d6d', backgroundColor:'rgba(255,77,109,.05)', fill:false, tension:.4, pointRadius:3 },
+        { label:'Ahorro',   data: sm.savings||[], borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.05)', fill:false, tension:.4, pointRadius:3 }
+      ];
+
+  _charts.trend = new Chart($('chartTrend'), {
+    type: 'line',
+    data: { labels: sm.labels||[], datasets: trendDatasets },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8, padding:16 } } },
+      scales:{ y:{ ticks:{ callback: v => compact(v) }, grid:{ color:'rgba(255,255,255,0.04)' } }, x:{ grid:{ display:false } } },
+      interaction:{ mode:'index', intersect:false }
+    }
+  });
+
+  // ── Donut gastos categoría
+  const byCat = d.byCat || {};
+  const catEntries = Object.entries(byCat).sort((a,b) => b[1]-a[1]);
+  const mainCats = catEntries.slice(0,6);
+  const otherValue = catEntries.slice(6).reduce((sum, [, val]) => sum + val, 0);
+  const catKeys = mainCats.map(([key]) => key).concat(otherValue > 0 ? ['Otros'] : []);
+  const catValues = mainCats.map(([, val]) => val).concat(otherValue > 0 ? [otherValue] : []);
+  const donutCanvas = $('chartDonut');
+  if (donutCanvas) {
+    if (!catKeys.length) {
+      donutCanvas.style.display = 'none';
+      const empty = document.createElement('div');
+      empty.id = 'chartDonutEmpty';
+      empty.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:13px;gap:8px';
+      empty.innerHTML = '<i class="fas fa-chart-pie" style="opacity:0.4"></i> Sin gastos en el período';
+      donutCanvas.parentElement.appendChild(empty);
+    } else {
+      donutCanvas.style.display = '';
+      const prev = donutCanvas.parentElement.querySelector('#chartDonutEmpty');
+      if (prev) prev.remove();
+      _charts.donut = new Chart(donutCanvas, {
+        type: 'doughnut',
+        data: {
+          labels: catKeys,
+          datasets: [{ data: catValues, backgroundColor: PALETTE.slice(0,catKeys.length), borderWidth:2, borderColor:'#0f1520', hoverOffset: 10 }]
+        },
+        options: {
+          responsive:true, maintainAspectRatio:false,
+          cutout:'70%',
+          plugins:{
+            legend:{ position:'right', labels:{ usePointStyle:true, boxWidth:8, padding:12, font:{size:11} } },
+            tooltip:{ callbacks:{ label: ctx => ` ${ctx.label}: ${COP.format(ctx.raw)}` } }
+          }
+        }
+      });
+    }
+  }
+
+  // ── Flujo diario
+  const sd = d.series?.daily || {};
+  _charts.daily = new Chart($('chartDaily'), {
+    type: 'bar',
+    data: {
+      labels: sd.labels||[],
+      datasets: [
+        { label:'Ingresos', data: sd.income ||[], backgroundColor:'rgba(0,212,170,.55)', borderRadius:3, order: 2 },
+        { label:'Gastos',   data: sd.expense||[], backgroundColor:'rgba(255,77,109,.55)', borderRadius:3, order: 2 },
+        { label:'Neto', data: sd.net || [], type:'line', borderColor:'#7c3aed', backgroundColor:'rgba(124,58,237,.12)', tension:.35, pointRadius:2, pointHoverRadius:4, borderWidth:2, yAxisID:'y', order: 1 }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8, padding:12, font:{size:11} } } },
+      scales:{
+        x:{ stacked:false, grid:{ display:false }, ticks:{ font:{size:10} } },
+        y:{ stacked:false, ticks:{ callback: v => compact(v) }, grid:{ color:'rgba(255,255,255,0.04)' } }
+      }
+    }
+  });
+
+  // ── Cuentas donut
+  const accs = d.accounts || [];
+  if (accs.length && $('chartCuentas')) {
+    _charts.cuentas = new Chart($('chartCuentas'), {
+      type: 'bar',
+      data: {
+        labels: accs.map(a => a.name),
+        datasets: [
+          { label:'Saldo actual', data: accs.map(a => a.bal || 0), backgroundColor: accs.map((_, i) => PALETTE[i % PALETTE.length]), borderRadius:8, borderSkipped:false, xAxisID:'x' },
+          { label:'Variación del mes', data: accs.map(a => a.deltaMes || 0), backgroundColor:'rgba(245,158,11,.65)', borderRadius:8, borderSkipped:false, xAxisID:'x1' }
+        ]
+      },
+      options: {
+        indexAxis:'y',
+        responsive:true, maintainAspectRatio:false,
+        plugins:{
+          legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8, padding:10, font:{size:11} } },
+          tooltip:{ callbacks:{ label: ctx => ` ${ctx.dataset.label}: ${COP.format(ctx.raw || 0)}` } }
+        },
+        scales:{
+          x:{ position:'bottom', ticks:{ callback: v => compact(v) }, grid:{ color:'rgba(255,255,255,0.05)' } },
+          x1:{ position:'top', ticks:{ callback: v => compact(v) }, grid:{ display:false } },
+          y:{ grid:{ display:false } }
+        }
+      }
+    });
+  }
+
+  // ── Inversiones por broker
+  const invT = d.invPorTipo || [];
+  if (invT.length && $('chartInvTipo')) {
+    _charts.invTipo = new Chart($('chartInvTipo'), {
+      type: 'doughnut',
+      data: {
+        labels: invT.map(x => x.tipo),
+        datasets: [{ data: invT.map(x => x.valor), backgroundColor: PALETTE, borderWidth:2, borderColor:'#0f1520' }]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false, cutout:'65%',
+        plugins:{ legend:{ position:'right', labels:{ usePointStyle:true, boxWidth:8, padding:10, font:{size:11} } } }
+      }
+    });
+  }
+
+  const invB = d.invPorBroker || [];
+  if (invB.length && $('chartInvBroker')) {
+    _charts.invBroker = new Chart($('chartInvBroker'), {
+      type: 'doughnut',
+      data: {
+        labels: invB.map(x => x.broker),
+        datasets: [{ data: invB.map(x => x.valor), backgroundColor: PALETTE, borderWidth:2, borderColor:'#0f1520' }]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false, cutout:'65%',
+        plugins:{ legend:{ position:'right', labels:{ usePointStyle:true, boxWidth:8, padding:10, font:{size:11} } } }
+      }
+    });
+  }
+
+  // ── Presupuesto bar chart
+  const budget = d.budget || {};
+  const bItems = (budget.items || []).filter(b => b.plan > 0);
+  if (bItems.length && $('chartBudget')) {
+    _charts.budget = new Chart($('chartBudget'), {
+      type: 'bar',
+      data: {
+        labels: bItems.map(b => b.cat),
+        datasets: [
+          { label:'Presupuesto', data: bItems.map(b => b.plan),  backgroundColor:'rgba(59,130,246,.3)', borderRadius:3 },
+          { label:'Real',        data: bItems.map(b => b.spent), backgroundColor: bItems.map(b => b.spent > b.plan ? 'rgba(255,77,109,.7)' : 'rgba(0,212,170,.7)'), borderRadius:3 }
+        ]
+      },
+      options: {
+        indexAxis:'y', responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8 } } },
+        scales:{
+          x:{ ticks:{ callback: v => compact(v) }, grid:{ color:'rgba(255,255,255,0.04)' } },
+          y:{ grid:{ display:false } }
+        }
+      }
+    });
+  }
+
+  const bm = budget.monthly || {};
+  if ((bm.labels || []).length && $('chartBudgetMonthly')) {
+    _charts.budgetMonthly = new Chart($('chartBudgetMonthly'), {
+      type: 'bar',
+      data: {
+        labels: bm.labels,
+        datasets: [
+          { label:'Plan', data: bm.plan || [], backgroundColor:'rgba(59,130,246,.35)', borderRadius:6 },
+          { label:'Real', data: bm.actual || [], backgroundColor:'rgba(255,77,109,.6)', borderRadius:6 }
+        ]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8 } } },
+        scales:{ y:{ ticks:{ callback:v => compact(v) } }, x:{ grid:{ display:false } } }
+      }
+    });
+  }
+
+  if (bItems.length && $('chartBudgetRadar')) {
+    _charts.budgetRadar = new Chart($('chartBudgetRadar'), {
+      type: 'radar',
+      data: {
+        labels: bItems.slice(0, 8).map(b => b.cat),
+        datasets: [
+          { label:'Plan', data: bItems.slice(0, 8).map(b => b.plan), borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.12)' },
+          { label:'Real', data: bItems.slice(0, 8).map(b => b.spent), borderColor:'#ff4d6d', backgroundColor:'rgba(255,77,109,.12)' }
+        ]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8 } } },
+        scales:{ r:{ angleLines:{ color:'rgba(255,255,255,0.05)' }, grid:{ color:'rgba(255,255,255,0.05)' }, pointLabels:{ color:'#94a3b8' }, ticks:{ display:false } } }
+      }
+    });
+  }
+
+  const ws = d.summary?.weekSeries || {};
+  if ((ws.labels || []).length && $('chartWeek')) {
+    _charts.week = new Chart($('chartWeek'), {
+      type: 'bar',
+      data: {
+        labels: ws.labels,
+        datasets: [
+          { label:'Ingresos', data: ws.income || [], backgroundColor:'rgba(0,212,170,.55)', borderRadius:5 },
+          { label:'Gastos', data: ws.expense || [], backgroundColor:'rgba(255,77,109,.55)', borderRadius:5 },
+          { label:'Neto', data: ws.net || [], type:'line', borderColor:'#8b5cf6', tension:.35, pointRadius:2, borderWidth:2 }
+        ]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8 } } },
+        scales:{ y:{ ticks:{ callback:v => compact(v) } }, x:{ grid:{ display:false } } }
+      }
+    });
+  }
+}
+
+function setTrend(mode) {
+  _trendMode = mode;
+  ['mix','savings'].forEach(m => {
+    const btn = $('trendBtn-' + m);
+    if (btn) btn.className = 'btn btn-' + (m === mode ? 'primary' : 'ghost') + ' btn-sm';
+  });
+  if (_data) buildCharts(_data);
+}
+
+function destroyAll() {
+  Object.keys(_charts).forEach(k => { if (_charts[k]) { _charts[k].destroy(); delete _charts[k]; } });
+}
+
+// ═══════════════════════════════════════════════════════
+// RENDER COMPONENTS
+// ═══════════════════════════════════════════════════════
+function renderTopGastos(items) {
+  const el = $('topGastosList');
+  if (!el) return;
+  const maxVal = items[0]?.val || 1;
+  el.innerHTML = items.length ? items.map((g, i) => `
+    <div style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:13px">
+        <span style="font-weight:500">${esc(g.cat)}</span>
+        <span class="mono" style="color:var(--text-muted)">${COP.format(g.val)}</span>
+      </div>
+      <div class="progress">
+        <div class="progress-fill" style="width:${(g.val/maxVal*100).toFixed(1)}%;background:${['#ff4d6d','#f5a623','#8b5cf6','#3b82f6','#00d4aa'][i]||'#64748b'}"></div>
+      </div>
+    </div>
+  `).join('') : '<div class="empty-state"><i class="fas fa-chart-bar"></i><p>Sin gastos este mes</p></div>';
+}
+
+function renderRecentTxns(txns) {
+  const el = $('recentTxns');
+  if (!el) return;
+  el.innerHTML = txns.map(t => txnRow(t, false)).join('') || emptyRow(6, 'Sin movimientos');
+}
+
+let _movSortCol = 'fecha';
+let _movSortDir = 'desc';
+
+function renderMovimientos() {
+  if (!_data) return;
+  const q    = ($('searchMov')?.value || '').toLowerCase();
+  const type = $('filterType')?.value || '';
+  let rows = (_data.historial || []).filter(t => {
+    if (type && t.type !== type) return false;
+    if (q && !`${t.fecha} ${t.cat} ${t.desc} ${t.cuenta}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  // Sort
+  rows = [...rows].sort((a, b) => {
+    let aVal = a[_movSortCol] || '';
+    let bVal = b[_movSortCol] || '';
+    if (_movSortCol === 'monto') {
+      aVal = Number(a.monto || 0); bVal = Number(b.monto || 0);
+      return _movSortDir === 'asc' ? aVal - bVal : bVal - aVal;
+    }
+    if (typeof aVal === 'string') {
+      return _movSortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+    }
+    return _movSortDir === 'asc' ? aVal - bVal : bVal - aVal;
+  });
+
+  const el = $('allTxns');
+  if (el) el.innerHTML = rows.map(t => txnRow(t, true)).join('') || emptyRow(7, 'Sin resultados');
+  const cnt = $('movCount');
+  if (cnt) cnt.textContent = `${rows.length} de ${(_data.historial||[]).length} movimientos`;
+
+  // Update sort indicators
+  document.querySelectorAll('.mov-th-sort').forEach(th => {
+    const col = th.dataset.col;
+    const icon = th.querySelector('i');
+    if (icon) icon.className = col === _movSortCol
+      ? (_movSortDir === 'asc' ? 'fas fa-sort-up' : 'fas fa-sort-down')
+      : 'fas fa-sort';
+  });
+}
+
+function sortMovTable(col) {
+  if (_movSortCol === col) {
+    _movSortDir = _movSortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    _movSortCol = col;
+    _movSortDir = col === 'fecha' ? 'desc' : 'asc';
+  }
+  renderMovimientos();
+}
+
+function renderAccounts(accs) {
+  const el = $('accountsList');
+  if (!el) return;
+  el.innerHTML = accs.map(a => `
+    <div class="account-card">
+      <div>
+        <div class="account-name">${esc(a.name)}</div>
+        <div class="account-type">${typeLabel(a.type)} · Mes ${a.deltaMes >= 0 ? '+' : ''}${COP.format(a.deltaMes || 0)}</div>
+      </div>
+      <div class="account-bal ${a.bal < 0 ? 'text-danger' : ''}" style="color:${a.bal >= 0 ? 'var(--emerald)' : 'var(--red)'}">
+        ${COP.format(a.bal)}
+      </div>
+      <div style="grid-column:1 / -1;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:var(--text-muted);margin-top:6px">
+        <span>Ingresos: ${COP.format(a.ingresosMes || 0)}</span>
+        <span>Gastos: ${COP.format(a.gastosMes || 0)}</span>
+        <span>Transferencias: ${COP.format(a.transferenciasMes || 0)}</span>
+      </div>
+    </div>
+  `).join('') || '<div class="empty-state"><i class="fas fa-wallet"></i><p>Sin cuentas</p></div>';
+}
+
+function renderPresupuesto(budget) {
+  const el = $('budgetDetail');
+  const items = (budget.items || []).filter(b => b.plan > 0);
+  if (!el) return;
+
+  const meta = $('budgetMeta');
+  if (meta) meta.textContent = `Plan: ${COP.format(budget.totalPlan||0)} · Real: ${COP.format(budget.totalReal||0)}`;
+
+  el.innerHTML = items.map(b => {
+    const pct  = b.plan > 0 ? Math.min((b.spent / b.plan) * 100, 100) : 0;
+    const over = b.spent > b.plan;
+    const clr  = over ? 'var(--red)' : pct > 80 ? 'var(--gold)' : 'var(--emerald)';
+    return `
+      <div style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:13px">
+          <span style="font-weight:500">${esc(b.cat)}</span>
+          <span class="mono" style="color:${clr};font-size:12px">${pct.toFixed(0)}%${over?' ⚠️':''}</span>
+        </div>
+        <div class="progress">
+          <div class="progress-fill" style="width:${pct.toFixed(1)}%;background:${clr}"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;color:var(--text-muted)">
+          <span>Real: ${COP.format(b.spent)}</span>
+          <span>Límite: ${COP.format(b.plan)}</span>
+        </div>
+      </div>
+    `;
+  }).join('') || '<div class="empty-state"><i class="fas fa-bullseye-arrow"></i><p>Sin presupuestos configurados.<br>Agrégalos en la hoja Budgets.</p></div>';
+}
+
+// ═══════════════════════════════════════════════════════
+// BUDGET TEMPLATE EDITOR
+// ═══════════════════════════════════════════════════════
+function renderBudgetTemplateEditor(budget) {
+  const el = $('budgetEditor');
+  if (!el) return;
+  const cats = (_data?.combos?.categorias || []).filter(c => !c.includes('↔'));
+  const items = budget?.items || [];
+  const rows = budget?.rows || [];
+  const itemsMap = {};
+  items.forEach(i => { itemsMap[i.cat] = i; });
+  el.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.id = 'budgetFormWrap';
+  wrap.style.cssText = 'padding-top:8px;border-top:1px solid var(--border)';
+  wrap.innerHTML = '<div style="font-weight:700;margin-bottom:2px">Presupuesto base (permanente)</div><div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Se aplica a todos los meses. Para gastos puntuales usa "Eventualidad del mes" abajo.</div><div id="budgetFormFields" style="display:grid;gap:10px"></div><button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px;margin-top:12px" onclick="saveBudgetsNew()"><i class="fas fa-check"></i> Guardar presupuesto base</button>';
+  el.appendChild(wrap);
+  const fieldsEl = wrap.querySelector('#budgetFormFields');
+  cats.forEach(cat => {
+    const card = document.createElement('div');
+    card.style.cssText = 'background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;display:grid;grid-template-columns:minmax(120px,1fr) 120px 90px;align-items:center;gap:12px';
+    const current = itemsMap[cat] || {};
+    const historic = rows.find(r => r.cat === cat) || {};
+    const val = current.plan || historic.plan || 0;
+    const alertVal = current.alerta || historic.alerta || 80;
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.dataset.cat = cat; inp.value = val;
+    inp.className = 'form-input budgetInput mono';
+    inp.style.cssText = 'text-align:right';
+    inp.placeholder = '0'; inp.step = '1000'; inp.min = '0';
+    const alert = document.createElement('input');
+    alert.type = 'number'; alert.dataset.cat = cat; alert.value = alertVal;
+    alert.className = 'form-input budgetAlert mono';
+    alert.style.cssText = 'text-align:right';
+    alert.placeholder = '80'; alert.step = '1'; alert.min = '1'; alert.max = '100';
+    const lbl = document.createElement('span');
+    lbl.innerHTML = `<div style="font-size:13.5px;font-weight:500">${esc(cat)}</div><div style="font-size:11px;color:var(--text-muted)">Real: ${COP.format(current.spent || 0)}</div>`;
+    card.appendChild(lbl); card.appendChild(inp); card.appendChild(alert);
+    fieldsEl.appendChild(card);
+  });
+}
+
+function saveBudgetsNew() {
+  const inputs = document.querySelectorAll('.budgetInput');
+  const alerts = Array.from(document.querySelectorAll('.budgetAlert'));
+  const month = $('filtroMes')?.value || new Date().toISOString().slice(0, 7);
+  const items = [];
+  inputs.forEach(inp => {
+    let cat = inp.dataset.cat;
+    const mont = parseFloat(inp.value) || 0;
+    const alert = alerts.find(a => a.dataset.cat === cat);
+    const alertVal = parseFloat(alert?.value) || 80;
+    if (cat && mont > 0) {
+      cat = cat.replace(/^[^\w\s]+\s*/, '').trim();
+      items.push({ categoria: cat, limite: mont, alerta: alertVal, periodo: 'monthly' });
+    }
+  });
+  if (!items.length) { toast('Destina al menos una categoria', 'error'); return; }
+  google.script.run
+    .withSuccessHandler(() => { toast('Presupuestos guardados. Ver avance en Dashboard', 'success'); refreshData(); })
+    .withFailureHandler(e => toast('Error: ' + (e.message || e), 'error'))
+    .guardarPresupuestosLote(items);
+}
+
+function saveEventualidad() {
+  const cat = $('eventCat')?.value;
+  const limite = parseFloat($('eventLimite')?.value) || 0;
+  const month = $('filtroMes')?.value || new Date().toISOString().slice(0, 7);
+  if (!cat) { toast('Selecciona una categoría', 'error'); return; }
+  if (limite <= 0) { toast('Ingresa un límite mayor a 0', 'error'); return; }
+  google.script.run
+    .withSuccessHandler(() => {
+      toast(`Eventualidad "${cat}" guardada para ${month}`, 'success');
+      if ($('eventLimite')) $('eventLimite').value = '';
+      refreshData();
+    })
+    .withFailureHandler(e => toast('Error: ' + (e.message || e), 'error'))
+    .guardarPresupuestosLote([{ categoria: cat, limite, alerta: 80, periodo: month }]);
+}
+
+function loadEmailLogs() {
+  const el = $('emailsList');
+  if (el) el.innerHTML = '<div class="empty-state"><div class="loader-ring" style="width:28px;height:28px;border-width:2px"></div></div>';
+
+  google.script.run
+    .withSuccessHandler(logs => { _emailLogs = logs; renderEmails(); })
+    .withFailureHandler(e  => toast('Error cargando emails: ' + e.message, 'error'))
+    .getEmailLogs();
+}
+
+function filterEmails(status) {
+  _emailFilter = status;
+  ['All','Pend','Approved','Auto'].forEach(s => {
+    const btn = $('emailFilter' + s);
+    if (btn) btn.style.borderColor = '';
+  });
+  renderEmails();
+}
+
+function renderEmails() {
+  const el = $('emailsList');
+  if (!el) return;
+
+  const filtered = _emailFilter === 'all'
+    ? _emailLogs
+    : _emailLogs.filter(e => e.status === _emailFilter);
+
+  if (!filtered.length) {
+    el.innerHTML = '<div class="empty-state"><i class="fas fa-inbox"></i><p>No hay emails en esta categoría</p></div>';
+    return;
+  }
+
+  el.innerHTML = filtered.map(e => {
+    const statusBadge = {
+      pendiente:      '<span class="badge badge-gold"><i class="fas fa-clock"></i> Pendiente</span>',
+      auto_aprobado:  '<span class="badge badge-green"><i class="fas fa-robot"></i> Auto-aprobado</span>',
+      aprobado:       '<span class="badge badge-green"><i class="fas fa-check"></i> Aprobado</span>',
+      error:          '<span class="badge badge-red"><i class="fas fa-xmark"></i> Error</span>'
+    }[e.status] || '<span class="badge badge-gray">—</span>';
+
+    const confBar = e.confidence > 0 ? `
+      <div class="conf-bar">
+        <div style="width:60px;height:3px;background:var(--surface3);border-radius:99px;overflow:hidden">
+          <div style="width:${(e.confidence*100).toFixed(0)}%;height:100%;background:${e.confidence>=0.88?'var(--emerald)':e.confidence>=0.6?'var(--gold)':'var(--red)'};border-radius:99px"></div>
+        </div>
+        <span style="font-size:11px;color:var(--text-muted)">${(e.confidence*100).toFixed(0)}%</span>
+      </div>
+    ` : '';
+
+    const pending = e.status === 'pendiente' || e.status === 'pending';
+    const approveBtn = pending ? `
+      <button class="btn btn-success btn-sm" onclick="acceptEmailDirect(this,'${esc(e.id)}')">
+        <i class="fas fa-zap"></i> Confirmar
+      </button>
+    ` : '';
+
+    const editBtn = `
+      <button class="btn btn-ghost btn-sm" onclick="openEmailEditModal('${esc(e.id)}')">
+        <i class="fas fa-pen"></i> Editar
+      </button>
+    `;
+
+    const deleteBtn = `
+      <button class="btn btn-danger btn-sm" onclick="deleteEmail('${esc(e.id)}')">
+        <i class="fas fa-trash"></i> Ocultar
+      </button>
+    `;
+
+    const approveFullBtn = '';
+
+    return `
+      <div class="email-item">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+          <div style="flex:1">
+            <div class="email-subject">${esc(e.merchant || e.subject)}</div>
+            <div class="email-meta">
+              <span>${esc(e.from)}</span>
+              <span>${esc(e.date)}</span>
+              ${e.amount > 0 ? `<span class="email-amount">${COP.format(e.amount)}</span>` : ''}
+              ${e.type ? `<span><i class="fas fa-shapes" style="font-size:9px"></i> ${esc(typeLabel(e.type))}</span>` : ''}
+              ${e.category ? `<span><i class="fas fa-tag" style="font-size:9px"></i> ${esc(e.category)}</span>` : ''}
+            </div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:4px">${esc(e.snippet)}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+            ${statusBadge}
+            ${confBar}
+          </div>
+        </div>
+        <div class="email-actions">${approveBtn}${approveFullBtn}${editBtn}${deleteBtn}</div>
+        ${e.notes ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted)"><i class="fas fa-brain" style="font-size:10px"></i> ${esc(e.notes)}</div>` : ''}
+        ${e.obs ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted)"><i class="fas fa-note-sticky" style="font-size:10px"></i> ${esc(e.obs)}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+function buildBudgetTemplateText(items) {
+  const rows = (items || []).length
+    ? items.map(i => `${i.cat},${Math.round(i.plan || 0)},${Math.round(i.pct || 80)}`)
+    : [
+        'Alimentos,600000,85',
+        'Transporte,300000,80',
+        'Servicios,250000,80',
+        'Salud,200000,85',
+        'Entretenimiento,150000,80'
+      ];
+  return rows.join('\n');
+}
+
+function applyBudgetTemplate() {
+  const raw = $('budgetTemplateInput')?.value || '';
+  const items = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+    const [categoria, limite, alerta] = line.split(',').map(v => String(v || '').trim());
+    return { categoria, limite: Number(limite || 0), alerta: Number(alerta || 80) };
+  }).filter(x => x.categoria && x.limite > 0);
+  if (!items.length) { toast('Escribe al menos una fila válida de presupuesto', 'error'); return; }
+  google.script.run
+    .withSuccessHandler(() => { toast('Presupuestos guardados', 'success'); refreshData(); })
+    .withFailureHandler(e => toast('Error guardando presupuestos: ' + (e.message || e), 'error'))
+    .guardarPresupuestosLote(items);
+}
+
+function syncEmails() {
+  toast('Sincronizando Gmail...', 'info');
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.ok) {
+        toast(`✓ ${r.added} emails nuevos · ${r.skipped} omitidos`, 'success');
+        loadEmailLogs();
+        refreshData();
+      } else {
+        toast('Error: ' + r.error, 'error');
+      }
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .syncGmailLabel('gastos');
+}
+
+function loadFromLibrary() {
+  // Reservado para uso futuro
+  toast('Función no implementada', 'info');
+}
+
+function deleteFromLibrary() {
+  toast('Función no implementada', 'info');
+}
+
+// ═══════════════════════════════════════════════════════
+// MODAL TRANSACCIÓN
+// ═══════════════════════════════════════════════════════
+function openModal() {
+  $('txnDate').value = new Date().toISOString().slice(0,10);
+  $('modalOverlay').classList.add('open');
+}
+
+function closeModal() {
+  $('modalOverlay').classList.remove('open');
+  $('txnForm').reset();
+  $('txnDate').value = new Date().toISOString().slice(0,10);
+  $('txnLogId').value = '';
+  $('txnInvestment').value = 'false';
+  $('assetGroup').style.display = 'none';
+  selectTypeByValue('Egreso');
+}
+
+// Click fuera del modal lo cierra
+$('modalOverlay').addEventListener('click', e => { if (e.target === $('modalOverlay')) closeModal(); });
+$('emailEditModal').addEventListener('click', e => { if (e.target === $('emailEditModal')) closeEmailEditModal(); });
+$('editTxnModal').addEventListener('click', e => { if (e.target === $('editTxnModal')) closeEditTxnModal(); });
+$('editInvModal').addEventListener('click', e => { if (e.target === $('editInvModal')) closeEditInvModal(); });
+  $('newInvModal').addEventListener('click', e => { if (e.target === $('newInvModal')) closeNewInvModal(); });
+function selectType(tab) {
+  document.querySelectorAll('.type-tab').forEach(t => t.className = 'type-tab');
+  const t = tab.dataset.type;
+  const isInvestment = t === 'Inversión';
+  const activeClass = isInvestment ? 'transfer' : t === 'Egreso' ? 'expense' : t === 'Ingreso' ? 'income' : 'transfer';
+  tab.className = `type-tab active-${activeClass}`;
+  $('txnType').value = isInvestment ? 'Transferencia' : t;
+  $('txnInvestment').value = isInvestment ? 'true' : 'false';
+  $('destGroup').style.display = 'Transferencia' === $('txnType').value ? '' : 'none';
+  $('assetGroup').style.display = isInvestment ? '' : 'none';
+  $('lblCuenta').textContent = $('txnType').value === 'Transferencia' ? 'Cuenta origen' : 'Cuenta';
+  if (isInvestment) {
+    const option = Array.from($('selCat').options).find(o => o.value.toLowerCase().includes('inversion'));
+    if (option) $('selCat').value = option.value;
+  }
+}
+
+function selectTypeByValue(val) {
+  const tab = document.querySelector(`.type-tab[data-type="${val}"]`);
+  if (tab) selectType(tab);
+}
+
+function submitTxn(e) {
+  e.preventDefault();
+  const btn = $('saveBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...';
+
+  const fd = Object.fromEntries(new FormData(e.target));
+  fd.tipo = $('txnType').value;
+  if (fd.inversion === 'true') {
+    fd.activoInversion = String(fd.activoInversion || '').trim();
+  }
+
+  const logId = fd.logId;
+  delete fd.logId;
+
+  google.script.run
+    .withSuccessHandler(r => {
+      closeModal();
+      toast('¡Transacción guardada!', 'success');
+      if (logId) {
+        // Mark email as approved
+        google.script.run
+          .withSuccessHandler(() => {
+            loadEmailLogs();
+          })
+          .aprobarEmail(logId, fd.categoria, fd.cuenta);
+      }
+      refreshData();
+    })
+    .withFailureHandler(err => {
+      toast(err.message || 'Error guardando', 'error');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-check"></i> Guardar transacción';
+    })
+    .guardarTransaccion(fd);
+}
+
+// ═══════════════════════════════════════════════════════
+// APROBAR EMAIL RÁPIDO (1 click directo)
+// ═══════════════════════════════════════════════════════
+function acceptEmailDirect(btn, logId) {
+  const e = _emailLogs.find(x => String(x.id) === String(logId));
+  if (!e) { toast('Email no encontrado', 'error'); return; }
+
+  btn = btn?.closest('button') || btn;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Aceptando...';
+
+  toast('Registrando transacción automáticamente...', 'info');
+  google.script.run
+    .withSuccessHandler(result => {
+      if (result.ok) {
+        toast(`✓ Transacción creada: ${result.merchant} · ${COP.format(result.amount)}`, 'success');
+        loadEmailLogs();
+        refreshData();
+      } else {
+        toast('Error: ' + (result.error || 'Unknown'), 'error');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-zap"></i> Aceptar Rápido';
+      }
+    })
+    .withFailureHandler(err => {
+      toast('Error: ' + (err.message || err), 'error');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-zap"></i> Aceptar Rápido';
+    })
+    .acceptEmailQuick(logId);
+}
+
+// ═══════════════════════════════════════════════════════
+// MODAL APROBAR EMAIL
+// ═══════════════════════════════════════════════════════
+function openApproveModal(logId, merchant, amount, currency) {
+  const e = _emailLogs.find(x => String(x.id) === String(logId));
+  if (!e) { toast('No se encontró el correo', 'error'); return; }
+
+  // Pre-fill the main transaction modal
+  $('txnType').value = 'Egreso';
+  selectTypeByValue('Egreso');
+  $('txnDate').value = e.date ? new Date(e.date).toISOString().slice(0,10) : new Date().toISOString().slice(0,10);
+  $('txnForm').querySelector('[name="descripcion"]').value = merchant || e.subject || '';
+  $('txnForm').querySelector('[name="monto"]').value = amount || '';
+  if (e.category) $('selCat').value = e.category;
+  const defaultAccount = _data?.combos?.cuentas?.find(c => c.includes('Bancolombia')) || _data?.combos?.cuentas?.[0] || '';
+  if (defaultAccount) $('selCuenta').value = defaultAccount;
+  $('txnLogId').value = e.id;
+
+  $('modalOverlay').classList.add('open');
+}
+
+function closeApproveModal() {
+  closeModal(); // openApproveModal reutiliza el modal principal
+}
+
+function confirmApprove() {
+  // Aprobación completa — se gestiona desde submitTxn con txnLogId
+  closeModal();
+}
+
+// ═══════════════════════════════════════════════════════
+// ELIMINAR TRANSACCIÓN
+// ═══════════════════════════════════════════════════════
+function deleteEmail(logId) {
+  if (!confirm('¿Ocultar este correo de la bandeja?')) return;
+  google.script.run
+    .withSuccessHandler(() => {
+      toast('Correo oculto', 'success');
+      loadEmailLogs();
+    })
+    .withFailureHandler(e => toast('Error ocultando: ' + e.message, 'error'))
+    .eliminarCorreoGasto(logId);
+}
+
+// ═══════════════════════════════════════════════════════
+// PRESUPUESTO — Cargar Plantilla
+// ═══════════════════════════════════════════════════════
+function loadBudgetTemplate() {
+  const input = $('budgetTemplateInput');
+  if (!input) {
+    toast('Abre la sección de presupuesto para editar la plantilla', 'info');
+    navTo('presupuesto', null);
+    return;
+  }
+  applyBudgetTemplate();
+  return;
+  toast('Cargando plantilla de presupuesto...', 'info');
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.ok) {
+        toast(`✓ ${r.message} (Total: ${r.total})`, 'success');
+        refreshData();
+      } else {
+        toast('Error: ' + (r.error || 'Unknown'), 'error');
+      }
+    })
+    .withFailureHandler(e => toast('Error: ' + (e.message || e), 'error'))
+    .loadBudgetTemplate();
+}
+
+// ═══════════════════════════════════════════════════════
+// EXPORT CSV
+// ═══════════════════════════════════════════════════════
+function exportCSV() {
+  const mes = $('filtroMes').value;
+  toast('Preparando CSV...', 'info');
+  google.script.run
+    .withSuccessHandler(csv => {
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = `FinanzasAI_${mes}.csv`; a.click();
+      URL.revokeObjectURL(url);
+      toast('CSV descargado', 'success');
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .exportCSV(mes);
+}
+
+// ═══════════════════════════════════════════════════════
+// TOAST SYSTEM
+// ═══════════════════════════════════════════════════════
+function openEmailEditModal(logId) {
+  const e = _emailLogs.find(x => String(x.id) === String(logId));
+  if (!e) { toast('No se encontró el correo', 'error'); return; }
+  
+  const modal = document.getElementById('emailEditModal');
+  document.getElementById('emailEditLogId').value = logId;
+  document.getElementById('emailEditTitle').textContent = e.subject || 'Sin asunto';
+  document.getElementById('emailEditFrom').textContent = e.from || 'Desconocido';
+  document.getElementById('emailEditDate').textContent = e.date || '-';
+  
+  const catSel = document.getElementById('emailEditCat');
+  catSel.value = e.category || 'Otros';
+  document.getElementById('emailEditType').value = e.type || 'expense';
+  document.getElementById('emailEditObs').value = e.obs || '';
+  document.getElementById('emailEditNotes').value = e.notes || '';
+  document.getElementById('emailEditBody').value = e.body || e.snippet || '';
+  document.getElementById('emailEditAmount').value = e.amount || 0;
+  document.getElementById('emailEditMerchant').value = e.merchant || e.subject || '';
+  const accSel = document.getElementById('emailEditAccount');
+  if (accSel) accSel.value = e.account || _data?.combos?.cuentas?.[0] || '';
+  
+  modal.classList.add('open');
+}
+
+function closeEmailEditModal() {
+  document.getElementById('emailEditModal').classList.remove('open');
+}
+
+function saveEmailEdits() {
+  const logId = document.getElementById('emailEditLogId').value;
+  const amount = parseFloat(document.getElementById('emailEditAmount').value) || 0;
+  const merchant = document.getElementById('emailEditMerchant').value;
+  const category = document.getElementById('emailEditCat').value;
+  const type = document.getElementById('emailEditType').value;
+  const account = document.getElementById('emailEditAccount')?.value || '';
+  const obs = document.getElementById('emailEditObs').value;
+  const notes = document.getElementById('emailEditNotes').value;
+  
+  if (!merchant || !category) { toast('Completa monto, comercio y categoría', 'error'); return; }
+  
+  google.script.run
+    .withSuccessHandler(() => {
+      toast('Correo y movimiento actualizados', 'success');
+      closeEmailEditModal();
+      loadEmailLogs();
+      refreshData();
+    })
+    .withFailureHandler(err => toast('Error guardando: ' + (err.message || err), 'error'))
+    .guardarCorreoEditado(logId, {
+      monto: amount,
+      comercio: merchant,
+      categoria_usuario: category,
+      tipo_ia: type,
+      cuenta_sugerida: account,
+      observacion: obs,
+      notas_ia: notes,
+      sincronizar_movimiento: true
+    });
+}
+
+function openEditTxnModal(txnId) {
+  const t = (_data?.historial || []).find(x => String(x.id) === String(txnId));
+  if (!t) { toast('Movimiento no encontrado', 'error'); return; }
+  
+  const modal = document.getElementById('editTxnModal');
+  document.getElementById('editTxnId').value = txnId;
+  document.getElementById('editTxnFecha').value = toIsoDate(t.fecha);
+  document.getElementById('editTxnDesc').value = t.desc || '';
+  document.getElementById('editTxnCat').value = t.cat || 'Otros';
+  document.getElementById('editTxnMonto').value = t.monto || 0;
+  document.getElementById('editTxnCuenta').value = t.cuenta || '';
+  document.getElementById('editTxnNotas').value = t.notas || '';
+  
+  modal.classList.add('open');
+}
+
+function closeEditTxnModal() {
+  document.getElementById('editTxnModal').classList.remove('open');
+}
+
+function saveTxnEdits() {
+  const txnId = document.getElementById('editTxnId').value;
+  const fecha = document.getElementById('editTxnFecha').value;
+  const desc = document.getElementById('editTxnDesc').value;
+  const cat = document.getElementById('editTxnCat').value;
+  const monto = parseFloat(document.getElementById('editTxnMonto').value) || 0;
+  const cuenta = document.getElementById('editTxnCuenta').value;
+  const notas = document.getElementById('editTxnNotas').value;
+  
+  if (!fecha || !desc || !cat || monto <= 0) { toast('Completa fecha, descripción, categoría y monto', 'error'); return; }
+  
+  google.script.run
+    .withSuccessHandler(() => {
+      toast('Movimiento actualizado', 'success');
+      closeEditTxnModal();
+      refreshData();
+    })
+    .withFailureHandler(err => toast('Error actualizando: ' + (err.message || err), 'error'))
+    .editarMovimiento(txnId, { fecha, descripcion: desc, categoria: cat, monto, cuenta, notas });
+}
+
+function openNewInvModal() {
+  $('newInvForm').reset();
+  $('newInvFecha').value = new Date().toISOString().slice(0, 10);
+  $('newInvCuenta').value = 'Nu';
+  $('newInvOperacion').value = 'Compra';
+  $('newInvMonedaCompra').value = 'USD';
+  $('newInvFuentePrecio').value = 'GOOGLEFINANCE';
+  toggleNewInvPrecioManual();
+  $('newInvModal').classList.add('open');
+}
+
+function closeNewInvModal() {
+  $('newInvModal').classList.remove('open');
+  $('newInvForm').reset();
+}
+
+function toggleNewInvPrecioManual() {
+  const fuente = $('newInvFuentePrecio')?.value;
+  const precioGroup = $('newInvPrecioActualGroup');
+  if (precioGroup) {
+    precioGroup.style.display = fuente === 'MANUAL' ? '' : 'none';
+  }
+}
+
+function submitNewInv(e) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...';
+
+  const form = {
+    fecha_compra: String($('newInvFecha').value || new Date().toISOString().slice(0, 10)),
+    cuenta: String($('newInvCuenta').value || 'Nu'),
+    broker: String($('newInvBroker').value || '').trim(),
+    operacion: String($('newInvOperacion').value || 'Compra'),
+    ticker: String($('newInvTicker').value || '').trim().toUpperCase(),
+    activo: String($('newInvActivo').value || '').trim(),
+    cantidad: parseFloat($('newInvCantidad').value) || 0,
+    precio_compra: parseFloat($('newInvPrecioCompra').value) || 0,
+    moneda_compra: String($('newInvMonedaCompra').value || 'USD'),
+    trm_compra: parseFloat($('newInvTrmCompra').value) || 0,
+    fuente_precio: String($('newInvFuentePrecio').value || 'MANUAL'),
+    precio_actual: parseFloat($('newInvPrecioActual').value) || 0,
+    notas: String($('newInvNotas').value || '').trim()
+  };
+
+  if (!form.activo) {
+    toast('El nombre del activo es requerido', 'error');
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    return;
+  }
+
+  if (!form.cantidad || form.cantidad <= 0) {
+    toast('La cantidad debe ser mayor a 0', 'error');
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    return;
+  }
+
+  if (!form.precio_compra || form.precio_compra <= 0) {
+    toast('El precio de compra es requerido', 'error');
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+    return;
+  }
+
+  google.script.run
+    .withSuccessHandler(r => {
+      closeNewInvModal();
+      toast('✅ Inversión agregada al portafolio', 'success');
+      refreshData();
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    })
+    .withFailureHandler(err => {
+      toast('Error: ' + (err.message || err), 'error');
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    })
+    .guardarInversionEs(form);
+}
+
+// ═══════════════════════════════════════════════════════
+// EDITAR INVERSIÓN
+// ═══════════════════════════════════════════════════════
+function openEditInvModal(invId) {
+  const item = (_data?.inversiones || []).find(x => String(x.inversion_id || x.id) === String(invId));
+  if (!item) { toast('Inversión no encontrada', 'error'); return; }
+  
+  const modal = document.getElementById('editInvModal');
+  document.getElementById('editInvId').value = item.inversion_id || invId;
+  document.getElementById('editInvActivo').value = item.activo || '';
+  document.getElementById('editInvSimbolo').value = item.ticker || '';
+  document.getElementById('editInvTipo').value = item.operacion || 'Compra';
+  document.getElementById('editInvBroker').value = item.broker || '';
+  document.getElementById('editInvCantidad').value = item.cantidad || 0;
+  document.getElementById('editInvCostoProm').value = item.precio_compra || 0;
+  document.getElementById('editInvPrecio').value = item.precio_actual || 0;
+  document.getElementById('editInvNotas').value = item.notas || '';
+  
+  modal.classList.add('open');
+}
+
+function closeEditInvModal() {
+  document.getElementById('editInvModal').classList.remove('open');
+}
+
+function saveInvEdits() {
+  const invId = document.getElementById('editInvId').value;
+  const activo = document.getElementById('editInvActivo').value;
+  const simbolo = document.getElementById('editInvSimbolo').value;
+  const tipo = document.getElementById('editInvTipo').value;
+  const broker = document.getElementById('editInvBroker').value;
+  const cantidad = parseFloat(document.getElementById('editInvCantidad').value) || 0;
+  const costo_promedio = parseFloat(document.getElementById('editInvCostoProm').value) || 0;
+  const precio_actual = parseFloat(document.getElementById('editInvPrecio').value) || 0;
+  const notas = document.getElementById('editInvNotas').value;
+  
+  if (!activo || cantidad <= 0) { toast('Completa activo y cantidad', 'error'); return; }
+
+  google.script.run
+    .withSuccessHandler(() => {
+      toast('Inversión actualizada', 'success');
+      closeEditInvModal();
+      refreshData();
+    })
+    .withFailureHandler(err => toast('Error actualizando inversión: ' + (err.message || err), 'error'))
+    .guardarInversionEs({
+      inversion_id: invId,
+      activo,
+      ticker: simbolo,
+      operacion: tipo,
+      broker,
+      cantidad,
+      precio_compra: costo_promedio,
+      precio_actual,
+      notas
+    });
+}
+
+function editTxn(txnId) { openEditTxnModal(txnId); }
+function editInvestment(invId) { openEditInvModal(invId); }
+
+function deleteInvestment(invId) {
+  if (!confirm('¿Eliminar esta inversión?')) return;
+  google.script.run
+    .withSuccessHandler(() => { toast('Inversión eliminada', 'success'); refreshData(); })
+    .withFailureHandler(err => toast('Error eliminando inversión: ' + (err.message || err), 'error'))
+    .eliminarInversionEs(invId);
+}
+
+function txnRow(t, withDelete) {
+  const isIncome = t.type === 'income';
+  const isTransfer = t.type === 'transfer';
+  const color = isIncome ? 'var(--emerald)' : isTransfer ? 'var(--blue)' : 'var(--red)';
+  const sign = isIncome ? '+' : isTransfer ? '↔' : '-';
+  const sourceHtml = t.source === 'gmail'
+    ? `<span class="badge badge-blue"><i class="fas fa-envelope" style="font-size:9px"></i> Gmail</span>`
+    : `<span class="badge badge-gray">${esc(t.source || 'manual')}</span>`;
+  const actions = withDelete
+    ? `<div style="display:flex;gap:6px;justify-content:flex-end"><button class="btn btn-ghost btn-sm btn-icon" onclick="editTxn('${esc(t.id)}')" title="Editar"><i class="fas fa-pen" style="font-size:11px"></i></button><button class="btn btn-danger btn-sm btn-icon" onclick="deleteTxn('${esc(t.id)}')" title="Eliminar"><i class="fas fa-trash" style="font-size:11px"></i></button></div>`
+    : '';
+  return `<tr>
+    <td class="mono" style="font-size:12px;color:var(--text-muted)">${esc(t.fecha)}</td>
+    <td style="max-width:240px;font-weight:500">${esc(t.desc || t.cat)}<div style="margin-top:4px"><span class="badge badge-${isIncome ? 'green' : isTransfer ? 'blue' : 'gray'}">${esc(typeLabel(t.type))}</span></div></td>
+    <td><span class="badge badge-gray">${esc(t.cat)}</span><div style="margin-top:4px;font-size:11px;color:var(--text-muted)">${esc(t.moneda || 'COP')}</div></td>
+    <td class="mono" style="text-align:right;color:${color};font-weight:600">${sign}${COP.format(Math.abs(t.monto || 0))}</td>
+    <td style="color:var(--text-muted);font-size:12px">${esc(t.cuenta || '')}${t.cuentaDestino ? `<div style="margin-top:4px">${esc(t.cuentaDestino)}</div>` : ''}</td>
+    <td>${sourceHtml}${t.notas ? `<div style="margin-top:4px;font-size:11px;color:var(--text-muted)">${esc(t.notas)}</div>` : ''}</td>
+    ${withDelete ? `<td>${actions}</td>` : ''}
+  </tr>`;
+}
+
+// Global state for investments
+let _invData = [];
+let _invSortCol = 'vr_mercado_actual_base';
+let _invSortDir = 'desc';
+
+function renderInversiones(invs, invPorTipo, invPorBroker) {
+  _invData = invs || [];
+  
+  // Update summary stats
+  updateInvStats(invs);
+  
+  // Update performance metrics
+  updateInvPerformance(invs);
+  
+  // Update charts stats
+  updateInvChartsStats(invPorTipo, invPorBroker);
+  
+  // Render table
+  renderInvTable(_invData);
+}
+
+function updateInvStats(invs) {
+  if (!invs || !invs.length) {
+    setText('invTotal', '$0');
+    setText('invPositions', '0');
+    setText('invTotalPnL', '$0');
+    setText('invPnLPercent', '<span class="inv-pnl-pct">—</span>');
+    setText('invBestReturn', '—');
+    setText('invWinRate', '—');
+    setText('invWinRateDetail', '');
+    return;
+  }
+  
+  const totalValor = invs.reduce((s, i) => s + (i.vr_mercado_actual_base || 0), 0);
+  const totalPnL = invs.reduce((s, i) => s + (i.pyg_base || 0), 0);
+  const totalCost = invs.reduce((s, i) => s + (i.vr_mercado_compra || 0), 0);
+  const avgPct = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
+  
+  // Win rate
+  const winners = invs.filter(i => (i.pyg_base || 0) > 0).length;
+  const losers = invs.filter(i => (i.pyg_base || 0) < 0).length;
+  const total = winners + losers;
+  const winRate = total > 0 ? (winners / total * 100).toFixed(0) : 0;
+  
+  // Best performer
+  const best = [...invs].sort((a, b) => (b.pyg_pct || 0) - (a.pyg_pct || 0))[0];
+  const bestPct = best?.pyg_pct || 0;
+  
+  setText('invTotal', COP.format(totalValor));
+  setText('invPositions', invs.length);
+  setText('invTotalPnL', (totalPnL >= 0 ? '+' : '') + COP.format(totalPnL));
+  setText('invPnLPercent', `<span class="inv-pnl-pct" style="background:${totalPnL >= 0 ? 'rgba(0,212,170,0.12)' : 'rgba(255,77,109,0.12)'};color:${totalPnL >= 0 ? 'var(--emerald)' : 'var(--red)'}">${avgPct >= 0 ? '+' : ''}${avgPct.toFixed(2)}%</span>`);
+  setText('invBestReturn', best ? `${esc(best.activo)} ${bestPct >= 0 ? '+' : ''}${bestPct.toFixed(2)}%` : '—');
+  setText('invWinRate', `${winRate}%`);
+  setText('invWinRateDetail', `${winners} ganadoras / ${losers} perdedoras`);
+}
+
+function updateInvPerformance(invs) {
+  if (!invs || !invs.length) {
+    setText('invPerfTotal', '$0');
+    setText('invPerfCost', '$0');
+    setText('invPerfPnL', '$0');
+    setText('invPerfPct', '0%');
+    return;
+  }
+  
+  const totalValor = invs.reduce((s, i) => s + (i.vr_mercado_actual_base || 0), 0);
+  const totalCost = invs.reduce((s, i) => s + (i.vr_mercado_compra || 0), 0);
+  const totalPnL = totalValor - totalCost;
+  const pct = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
+  
+  setText('invPerfTotal', COP.format(totalValor));
+  setText('invPerfCost', COP.format(totalCost));
+  setText('invPerfPnL', (totalPnL >= 0 ? '+' : '') + COP.format(totalPnL));
+  setText('invPerfPct', (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%');
+}
+
+function updateInvChartsStats(invPorTipo, invPorBroker) {
+  // Tipo legend
+  const tipoLegend = $('invTipoLegend');
+  if (tipoLegend && invPorTipo?.length) {
+    tipoLegend.innerHTML = invPorTipo.slice(0, 4).map((t, i) => `
+      <span style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted)">
+        <span style="width:8px;height:8px;border-radius:50%;background:${PALETTE[i]}"></span>
+        ${esc(t.tipo)} (${COP.format(t.valor)})
+      </span>
+    `).join('');
+  }
+  
+  // Broker legend
+  const brokerLegend = $('invBrokerLegend');
+  if (brokerLegend && invPorBroker?.length) {
+    brokerLegend.innerHTML = invPorBroker.slice(0, 4).map((b, i) => `
+      <span style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted)">
+        <span style="width:8px;height:8px;border-radius:50%;background:${PALETTE[i]}"></span>
+        ${esc(b.broker)} (${COP.format(b.valor)})
+      </span>
+    `).join('');
+  }
+}
+
+function renderInvTable(invs) {
+  const el = $('invTableBody');
+  if (!el) return;
+  
+  // Apply filters
+  const search = ($('invSearch')?.value || '').toLowerCase();
+  const filterTipo = ($('invFilterTipo')?.value || '').toLowerCase();
+  
+  let filtered = invs.filter(i => {
+    if (search && !`${i.activo} ${i.ticker} ${i.broker} ${i.cuenta}`.toLowerCase().includes(search)) return false;
+    if (filterTipo && !`${i.operacion}`.toLowerCase().includes(filterTipo)) return false;
+    return true;
+  });
+  
+  // Sort
+  filtered.sort((a, b) => {
+    let aVal = a[_invSortCol] || 0;
+    let bVal = b[_invSortCol] || 0;
+    if (typeof aVal === 'string') {
+      return _invSortDir === 'desc' ? bVal.localeCompare(aVal) : aVal.localeCompare(bVal);
+    }
+    if (_invSortDir === 'desc') [aVal, bVal] = [bVal, aVal];
+    return aVal - bVal;
+  });
+  
+  // Calculate total for percentages
+  const totalValor = invs.reduce((s, i) => s + (i.vr_mercado_actual_base || 0), 0);
+  
+  if (!filtered.length) {
+    el.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:48px;color:var(--text-muted)"><i class="fas fa-chart-simple" style="font-size:32px;opacity:0.3;display:block;margin-bottom:12px"></i>Sin posiciones encontradas</td></tr>';
+    setText('invPositionsCount', `0 posiciones`);
+    setText('invTotalValue', `Total: $0`);
+    return;
+  }
+  
+  el.innerHTML = filtered.map(i => {
+    const pygBase = i.pyg_base || 0;
+    const pygPct = i.pyg_pct || 0;
+    const vrActual = i.vr_mercado_actual_base || 0;
+    const pctPortfolio = totalValor > 0 ? (vrActual / totalValor * 100) : 0;
+    const tipoClass = getInvTipoClass(i);
+    const fuenteAuto = (i.fuente_precio || '').toUpperCase() === 'GOOGLEFINANCE';
+    
+    return `<tr>
+      <td>
+        <div class="inv-asset-cell">
+          <span class="inv-asset-name">${esc(i.activo)}</span>
+          <span class="inv-asset-symbol">${esc(i.ticker || '—')}</span>
+        </div>
+      </td>
+      <td><span class="inv-badge ${tipoClass}">${esc(i.operacion || 'Compra')}</span></td>
+      <td style="color:var(--text-muted)">${esc(i.broker || '—')}</td>
+      <td class="inv-mono">${Number(i.cantidad || 0).toLocaleString('es-CO', {maximumFractionDigits: 4})}</td>
+      <td class="inv-mono">${COP.format(i.precio_compra || 0)}</td>
+      <td class="inv-mono" style="color:var(--text-muted);cursor:pointer" title="Click para actualizar precio manualmente" onclick="openPrecioManualModal('${esc(i.inversion_id)}','${esc(i.activo)}')">${COP.format(i.precio_actual || 0)} <i class="fas fa-pen" style="font-size:9px;opacity:0.4"></i></td>
+      <td class="inv-mono" style="font-weight:600">${COP.format(vrActual)}</td>
+      <td>
+        <div class="inv-pnl-cell">
+          <span class="inv-pnl-amount ${pygBase >= 0 ? 'inv-pnl-positive' : 'inv-pnl-negative'}">${pygBase >= 0 ? '+' : ''}${COP.format(pygBase)}</span>
+        </div>
+      </td>
+      <td>
+        <div class="inv-pnl-cell">
+          <span class="inv-pnl-pct ${pygPct >= 0 ? 'inv-pnl-pct-pos' : 'inv-pnl-pct-neg'}">${pygPct >= 0 ? '+' : ''}${pygPct.toFixed(2)}%</span>
+        </div>
+      </td>
+      <td class="inv-mono" style="color:var(--text-muted)">${pctPortfolio.toFixed(1)}%</td>
+      <td style="font-size:11px;color:var(--text-muted)">${esc(i.moneda_actual || 'USD')}</td>
+      <td>
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:10px;color:var(--text-muted)">
+          <span><i class="fas fa-calendar" style="width:12px"></i> ${i.fecha_compra ? new Date(i.fecha_compra).toLocaleDateString('es-CO') : '—'}</span>
+          <span><i class="${fuenteAuto ? 'fas fa-sync' : 'fas fa-hand'}" style="width:12px"></i> ${fuenteAuto ? 'Auto' : 'Manual'}</span>
+        </div>
+      </td>
+      <td>
+        <div class="inv-actions-cell">
+          <button class="btn btn-ghost" onclick="openPrecioManualModal('${esc(i.inversion_id)}','${esc(i.activo)}')" title="Actualizar precio">
+            <i class="fas fa-dollar-sign" style="font-size:11px"></i>
+          </button>
+          <button class="btn btn-ghost" onclick="showInvNews('${esc(i.ticker || i.activo)}')" title="Noticias">
+            <i class="fas fa-newspaper" style="font-size:11px"></i>
+          </button>
+          <button class="btn btn-ghost" onclick="editInvestment('${esc(i.inversion_id || i.activo)}')" title="Editar">
+            <i class="fas fa-pen" style="font-size:11px"></i>
+          </button>
+          <button class="btn btn-danger" onclick="deleteInvestment('${esc(i.inversion_id || i.activo)}')" title="Eliminar">
+            <i class="fas fa-trash" style="font-size:11px"></i>
+          </button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+  
+  setText('invPositionsCount', `${filtered.length} de ${invs.length} posiciones`);
+  setText('invTotalValue', `Total: ${COP.format(totalValor)}`);
+}
+
+function getInvTipoClass(inv) {
+  const ticker = (inv.ticker || '').toUpperCase();
+  const activo = (inv.activo || '').toLowerCase();
+  
+  if (ticker.includes('ETF')) return 'inv-badge-etf';
+  if (ticker.includes('NASDAQ') || ticker.includes('NYSE')) return 'inv-badge-accion';
+  if (activo.includes('crypto') || activo.includes('btc') || activo.includes('bitcoin')) return 'inv-badge-cripto';
+  if (activo.includes('bono')) return 'inv-badge-bono';
+  if (inv.operacion === 'Venta') return 'inv-badge-bono';
+  return 'inv-badge-fondo';
+}
+
+function getTipoBadgeClass(tipo) {
+  const map = {
+    'etf': 'inv-badge-etf',
+    'accion': 'inv-badge-accion',
+    'acción': 'inv-badge-accion',
+    'cripto': 'inv-badge-cripto',
+    'criptomoneda': 'inv-badge-cripto',
+    'fondo': 'inv-badge-fondo',
+    'bono': 'inv-badge-bono'
+  };
+  return map[tipo?.toLowerCase()] || 'inv-badge-otro';
+}
+
+function filterInvTable() {
+  renderInvTable(_invData);
+}
+
+function sortInvTable(col) {
+  if (_invSortCol === col) {
+    _invSortDir = _invSortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    _invSortCol = col;
+    _invSortDir = 'desc';
+  }
+  renderInvTable(_invData);
+  
+  // Update sort icons
+  document.querySelectorAll('.inv-th-sortable i').forEach(icon => {
+    icon.className = 'fas fa-sort';
+  });
+  const activeHeader = document.querySelector(`.inv-th-sortable[onclick*="${col}"] i`);
+  if (activeHeader) {
+    activeHeader.className = _invSortDir === 'asc' ? 'fas fa-sort-up' : 'fas fa-sort-down';
+  }
+}
+
+// ─── Precio auto-mode ────────────────────────────────
+let _precioAutoMode = true;
+
+function loadPrecioMode() {
+  google.script.run
+    .withSuccessHandler(r => {
+      _precioAutoMode = r.auto !== false;
+      _updatePrecioModeUI();
+    })
+    .withFailureHandler(() => {})
+    .getPrecioAutoMode();
+}
+
+function _updatePrecioModeUI() {
+  const icon  = $('precioModeIcon');
+  const label = $('precioModeLabel');
+  const sub   = $('invActionPrecioSub');
+  if (_precioAutoMode) {
+    if (icon)  { icon.className = 'fas fa-rotate'; icon.style.color = 'var(--emerald)'; }
+    if (label) label.textContent = 'Auto';
+    if (sub)   sub.textContent = 'Auto · Yahoo Finance';
+  } else {
+    if (icon)  { icon.className = 'fas fa-hand-point-up'; icon.style.color = 'var(--gold)'; }
+    if (label) label.textContent = 'Manual';
+    if (sub)   sub.textContent = 'Manual';
+  }
+}
+
+function togglePrecioMode() {
+  _precioAutoMode = !_precioAutoMode;
+  _updatePrecioModeUI();
+  google.script.run
+    .withSuccessHandler(() => toast(_precioAutoMode ? '🔄 Precios en modo automático (diario)' : '✋ Precios en modo manual', 'info'))
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .setPrecioAutoMode(_precioAutoMode);
+}
+
+function refreshPricesInv() { refreshPricesInvManual(); }
+
+function refreshPricesInvManual() {
+  const btn = $('invActionPrecioIcon');
+  if (btn) btn.className = 'fas fa-spinner fa-spin';
+  toast('Actualizando precios desde Yahoo Finance...', 'info');
+  google.script.run
+    .withSuccessHandler(r => {
+      if (btn) btn.className = _precioAutoMode ? 'fas fa-rotate' : 'fas fa-hand-point-up';
+      if (r.ok) {
+        toast(`✅ Precios: ${r.actualizados} actualizados · ${r.manuales} manuales · ${r.errores} errores`, 'success');
+        refreshData();
+      } else {
+        toast('Error: ' + (r.error || 'Unknown'), 'error');
+      }
+    })
+    .withFailureHandler(e => {
+      if (btn) btn.className = 'fas fa-sync';
+      toast('Error actualizando precios: ' + e.message, 'error');
+    })
+    .actualizarPreciosInversiones();
+}
+
+// ─── Precio manual por fila ────────────────────────────
+function openPrecioManualModal(invId, activo) {
+  $('precioManualInvId').value = invId;
+  $('precioManualActivo').textContent = activo || invId;
+  $('precioManualValor').value = '';
+  $('precioManualModal').classList.add('open');
+  setTimeout(() => $('precioManualValor').focus(), 100);
+}
+
+function closePrecioManualModal() {
+  $('precioManualModal').classList.remove('open');
+}
+
+function submitPrecioManual() {
+  const invId  = $('precioManualInvId').value;
+  const precio = parseFloat($('precioManualValor').value) || 0;
+  if (!invId || precio <= 0) { toast('Ingresa un precio válido', 'error'); return; }
+
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.ok) {
+        toast('Precio actualizado', 'success');
+        closePrecioManualModal();
+        refreshData();
+      } else {
+        toast('Error: ' + (r.error || 'No encontrado'), 'error');
+      }
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .actualizarPrecioManualInversion(invId, precio);
+}
+
+function exportInvReport() {
+  if (!_invData?.length) {
+    toast('No hay inversiones para exportar', 'error');
+    return;
+  }
+  
+  const headers = ['Activo', 'Simbolo', 'Tipo', 'Broker', 'Cantidad', 'Precio Actual', 'Costo Promedio', 'Valor Total', 'P&L', 'Retorno %', 'Moneda'];
+  const rows = _invData.map(i => [
+    i.activo, i.simbolo || '', i.tipo || '', i.broker || '',
+    i.qty || 0, i.precio || 0, i.costo_promedio || 0, i.valor || 0,
+    i.pnl || 0, i.retorno_pct || 0, i.moneda || 'COP'
+  ]);
+  
+  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Portfolio_Report_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Reporte exportado', 'success');
+}
+
+function showInvNews(simbolo) {
+  const sym = simbolo || prompt('Ingresa el ticker o nombre del activo (ej: AAPL, VOO, Bancolombia):');
+  if (!sym) return;
+  toast(`Obteniendo noticias de ${sym}...`, 'info');
+  google.script.run
+    .withSuccessHandler(noticias => {
+      if (!noticias || !noticias.length) { toast('No se encontraron noticias', 'info'); return; }
+      const html = noticias.map(n => `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:13px;font-weight:500">${esc(n.title)}</div>
+          <div style="display:flex;gap:12px;margin-top:4px;font-size:11px;color:var(--text-muted)">
+            <span>${esc(n.date || '')}</span>
+            ${n.link && n.link !== '#' ? `<a href="${esc(n.link)}" target="_blank" style="color:var(--blue)">Ver nota →</a>` : ''}
+          </div>
+        </div>
+      `).join('');
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `
+        <div style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px">
+          <div style="background:var(--surface);border-radius:var(--radius);max-width:520px;width:100%;max-height:80vh;overflow-y:auto;padding:20px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:14px">
+              <div style="font-weight:700">Noticias · ${esc(sym)}</div>
+              <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px">✕</button>
+            </div>
+            ${html}
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+    })
+    .withFailureHandler(e => toast('Error noticias: ' + e.message, 'error'))
+    .obtenerNoticiasInversion(sym);
+}
+
+// ═══════════════════════════════════════════════════════
+// RECONCILIACIÓN DE SALDOS — CIERRE DE MES
+// ═══════════════════════════════════════════════════════
+function openReconcilModal() {
+  $('reconcilResult').style.display = 'none';
+  $('reconcilCuentasList').innerHTML = '<div class="empty-state" style="padding:20px"><div class="loader-ring" style="width:24px;height:24px;border-width:2px;margin:0 auto"></div></div>';
+  $('reconcilModal').classList.add('open');
+  // Set default month to current filtro
+  const defaultMes = $('filtroMes')?.value || new Date().toISOString().slice(0, 7);
+  const mesInput = $('reconcilMesInput');
+  if (mesInput && !mesInput.value) mesInput.value = defaultMes;
+  _loadReconcilCuentas();
+}
+
+function _loadReconcilCuentas() {
+  const mes = $('reconcilMesInput')?.value || new Date().toISOString().slice(0, 7);
+  $('reconcilCuentasList').innerHTML = '<div class="empty-state" style="padding:20px"><div class="loader-ring" style="width:24px;height:24px;border-width:2px;margin:0 auto"></div></div>';
+  google.script.run
+    .withSuccessHandler(r => {
+      if (!r.ok) { toast('Error cargando cuentas', 'error'); return; }
+      $('reconcilMesLabel').textContent = `Mes de cierre: ${r.mes}`;
+      _renderReconcilCuentas(r.cuentas, r.mes);
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .obtenerSaldosParaReconciliar(mes);
+}
+
+function closeReconcilModal() {
+  $('reconcilModal').classList.remove('open');
+}
+
+function _renderReconcilCuentas(cuentas, mes) {
+  const el = $('reconcilCuentasList');
+  if (!cuentas || !cuentas.length) {
+    el.innerHTML = '<div class="empty-state"><p>Sin cuentas configuradas</p></div>';
+    return;
+  }
+  el.innerHTML = cuentas.map(c => `
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:center">
+      <div>
+        <div style="font-size:13px;font-weight:600">${esc(c.nombre)}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${esc(c.tipo)} · ${esc(c.moneda)}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+          Calculado: <strong class="mono">${COP.format(c.saldo_calculado)}</strong>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px">Saldo real (extracto)</label>
+        <input type="number"
+          class="form-input mono reconcil-input"
+          data-cuenta="${esc(c.nombre)}"
+          data-mes="${esc(mes)}"
+          placeholder="${c.saldo_calculado}"
+          value=""
+          step="1"
+          style="text-align:right">
+      </div>
+    </div>
+  `).join('');
+}
+
+function submitReconcilSaldos() {
+  const inputs = document.querySelectorAll('.reconcil-input');
+  const ajustes = [];
+  inputs.forEach(inp => {
+    const val = parseFloat(inp.value);
+    if (!isNaN(val)) {
+      ajustes.push({
+        nombre:     inp.dataset.cuenta,
+        saldo_real: val,
+        mes:        inp.dataset.mes
+      });
+    }
+  });
+
+  if (!ajustes.length) {
+    toast('Ingresa al menos un saldo real para ajustar', 'error');
+    return;
+  }
+
+  const btn = $('reconcilSubmitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Aplicando ajustes…';
+
+  google.script.run
+    .withSuccessHandler(r => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-scale-balanced"></i> Aplicar ajustes de cierre';
+
+      const resultEl = $('reconcilResult');
+      if (r.total === 0) {
+        resultEl.innerHTML = '<i class="fas fa-circle-check" style="color:var(--emerald)"></i> Los saldos ya estaban correctos, no se generaron ajustes.';
+      } else {
+        const lines = r.ajustes.map(aj => {
+          const sign = aj.diferencia >= 0 ? '+' : '';
+          return `<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
+            <span>${esc(aj.cuenta)} <span style="font-size:10px;color:var(--text-muted)">(${esc(aj.tipo)})</span></span>
+            <span class="mono" style="color:${aj.diferencia >= 0 ? 'var(--emerald)' : 'var(--red)'}">${sign}${COP.format(aj.diferencia)}</span>
+          </div>`;
+        }).join('');
+        resultEl.innerHTML = `
+          <div style="font-weight:700;margin-bottom:8px;color:var(--emerald)"><i class="fas fa-circle-check"></i> ${r.total} ajuste(s) generado(s)</div>
+          ${lines}
+          <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Los ajustes aparecen en Movimientos como "Ajuste cierre ${r.mes}"</div>`;
+      }
+      resultEl.style.display = 'block';
+      refreshData();
+    })
+    .withFailureHandler(e => {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-scale-balanced"></i> Aplicar ajustes de cierre';
+      toast('Error al reconciliar: ' + (e.message || e), 'error');
+    })
+    .reconciliarSaldosMes(ajustes);
+}
+
+function toast(msg, type = 'info') {
+  const icons = { success:'fa-check-circle', error:'fa-circle-xmark', info:'fa-circle-info' };
+  const wrap  = $('toastWrap');
+  const el    = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<i class="fas ${icons[type]||icons.info}" style="color:${type==='success'?'var(--emerald)':type==='error'?'var(--red)':'var(--blue)'}"></i> ${esc(msg)}`;
+  wrap.appendChild(el);
+  setTimeout(() => { el.style.opacity='0'; el.style.transform='translateX(20px)'; el.style.transition='.3s'; setTimeout(()=>el.remove(),300); }, 3500);
+}
+
+// ═══════════════════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════════════════
+function setText(id, v) { const el = $(id); if (el) el.textContent = v; }
+
+function deleteTxn(txnId) {
+  if (!confirm('¿Eliminar este movimiento?')) return;
+  google.script.run
+    .withSuccessHandler(() => {
+      toast('Movimiento eliminado', 'success');
+      refreshData();
+    })
+    .withFailureHandler(e => toast('Error eliminando: ' + (e.message || e), 'error'))
+    .eliminarTransaccion(txnId);
+}
+
+function toIsoDate(displayDate) {
+  if (!displayDate) return new Date().toISOString().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(displayDate)) return displayDate;
+  const m = String(displayDate).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return new Date().toISOString().slice(0, 10);
+}
+
+function fillSelect(id, arr) {
+  const s = $(id);
+  if (!s) return;
+  s.innerHTML = '<option value="">— Seleccionar —</option>' +
+    arr.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m]);
+}
+
+function compact(v) {
+  const n = Number(v||0);
+  if (Math.abs(n) >= 1e9) return (n/1e9).toFixed(1)+'B';
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(0)+'K';
+  return n.toFixed(0);
+}
+
+function typeLabel(t) {
+  return { expense:'Gasto', income:'Ingreso', transfer:'Transferencia', cash:'Efectivo', savings:'Ahorros', digital:'Digital', credit:'Crédito', investment:'Inversión' }[t] || t;
+}
+
+function emptyRow(cols, msg) {
+  return `<tr><td colspan="${cols}" style="text-align:center;padding:32px;color:var(--text-muted)">${msg}</td></tr>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// PERIOD VIEWS — semana / mes / año / comparar
+// ═══════════════════════════════════════════════════════
+let _periodView = 'mes';
+
+function setPeriodView(view, btn) {
+  _periodView = view;
+  document.querySelectorAll('.period-tab').forEach(t => t.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  // Map view name → element id
+  const idMap = { mes: 'viewMes', semana: 'viewSemana', año: 'viewAño', comparar: 'viewComparar' };
+  Object.entries(idMap).forEach(([v, id]) => {
+    const el = $(id);
+    if (el) el.style.display = (v === view) ? '' : 'none';
+  });
+
+  if (!_data) return;
+  if (view === 'semana')   renderWeekView(_data);
+  if (view === 'año')      renderYearView(_data);
+  if (view === 'comparar') renderCompareView(_data);
+}
+
+function shiftMonth(delta) {
+  const cur = $('filtroMes').value || new Date().toISOString().slice(0, 7);
+  const [y, m] = cur.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  $('filtroMes').value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  refreshData();
+}
+
+function goToday() {
+  $('filtroMes').value = new Date().toISOString().slice(0, 7);
+  refreshData();
+}
+
+// ── Vista Semana ──────────────────────────────────────
+function renderWeekView(d) {
+  const s = d.summary?.week || {};
+  setText('kpi-week-income',  COP.format(s.income  || 0));
+  setText('kpi-week-expense', COP.format(s.expense || 0));
+  const net = (s.income || 0) - (s.expense || 0);
+  const netEl = $('kpi-week-net');
+  if (netEl) { netEl.textContent = COP.format(net); netEl.style.color = net >= 0 ? 'var(--emerald)' : 'var(--red)'; }
+
+  // Últimas txns de la semana
+  const now = Date.now();
+  const since = now - 7 * 86400000;
+  const weekTxns = (d.historial || []).filter(t => {
+    const [dd, mm, yy] = String(t.fecha || '').split('/').map(Number);
+    const ts = yy && mm && dd ? new Date(yy, mm - 1, dd).getTime() : 0;
+    return ts >= since;
+  });
+  const el = $('weekTxnList');
+  if (el) {
+    if (!weekTxns.length) {
+      el.innerHTML = '<div class="empty-state"><i class="fas fa-calendar-week"></i><p>Sin movimientos esta semana</p></div>';
+    } else {
+      el.innerHTML = '<div class="table-scroll"><table class="data-table"><thead><tr><th>Fecha</th><th>Descripción</th><th>Categoría</th><th style="text-align:right">Monto</th><th>Cuenta</th></tr></thead><tbody>' +
+        weekTxns.map(t => txnRow(t, false)).join('') + '</tbody></table></div>';
+    }
+  }
+}
+
+// ── Vista Año ─────────────────────────────────────────
+function renderYearView(d) {
+  const sm = d.series?.monthly || {};
+  const labels = sm.labels || [];
+  const incomes  = sm.income  || [];
+  const expenses = sm.expense || [];
+  const savings  = sm.savings || [];
+
+  const totalIncome  = incomes.reduce((s, v) => s + (v || 0), 0);
+  const totalExpense = expenses.reduce((s, v) => s + (v || 0), 0);
+  const totalSavings = totalIncome - totalExpense;
+  const savingsRate  = totalIncome > 0 ? (totalSavings / totalIncome * 100) : 0;
+
+  setText('kpi-year-income',  COP.format(totalIncome));
+  setText('kpi-year-expense', COP.format(totalExpense));
+  setText('kpi-year-savings', COP.format(totalSavings));
+  setText('kpi-year-rate', savingsRate.toFixed(1) + '%');
+
+  // Destruir gráficas viejas si existen
+  ['chartYearBreakdown','chartYearCats'].forEach(id => {
+    if (_charts[id]) { _charts[id].destroy(); delete _charts[id]; }
+  });
+
+  // Gráfica anual barras
+  const yb = $('chartYearBreakdown');
+  if (yb && labels.length) {
+    _charts.chartYearBreakdown = new Chart(yb, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Ingresos', data: incomes,  backgroundColor: 'rgba(0,212,170,.65)', borderRadius: 4 },
+          { label: 'Gastos',   data: expenses, backgroundColor: 'rgba(255,77,109,.65)', borderRadius: 4 },
+          { label: 'Ahorro',   data: savings,  type: 'line', borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.08)', tension: .4, pointRadius: 3, borderWidth: 2 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8 } } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { ticks: { callback: v => compact(v) }, grid: { color: 'rgba(255,255,255,0.04)' } }
+        }
+      }
+    });
+  }
+
+  // Donut categorías del año completo (usar byCat del mes filtrado como aprox; backend podría mejorar esto)
+  const byCat = d.byCat || {};
+  const catEntries = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const yc = $('chartYearCats');
+  if (yc && catEntries.length) {
+    _charts.chartYearCats = new Chart(yc, {
+      type: 'doughnut',
+      data: {
+        labels: catEntries.map(([k]) => k),
+        datasets: [{ data: catEntries.map(([, v]) => v), backgroundColor: PALETTE, borderWidth: 2, borderColor: '#0f1520' }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, cutout: '65%',
+        plugins: { legend: { position: 'right', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } } }
+      }
+    });
+  }
+
+  // Top gastos año
+  const el = $('topGastosYear');
+  if (el) {
+    el.innerHTML = catEntries.slice(0, 6).map(([c, v]) => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:13px">${esc(c)}</span>
+        <span class="mono" style="color:var(--red);font-weight:600">${COP.format(v)}</span>
+      </div>
+    `).join('') || '<div class="empty-state"><p>Sin datos</p></div>';
+  }
+}
+
+// ── Vista Comparar ────────────────────────────────────
+function renderCompareView(d) {
+  const sm = d.series?.monthly || {};
+  const labels  = sm.labels  || [];
+  const incomes  = sm.income  || [];
+  const expenses = sm.expense || [];
+
+  // Populate selects with available months
+  const selA = $('compareSelA');
+  const selB = $('compareSelB');
+  if (selA && selB && labels.length) {
+    const curSelA = selA.value;
+    const curSelB = selB.value;
+    const opts = labels.map(l => `<option value="${esc(l)}">${prettyMonth(l)}</option>`).join('');
+    selA.innerHTML = opts;
+    selB.innerHTML = opts;
+    // Default: A = current filtro, B = previous month
+    const curMes = d.mes || $('filtroMes').value || '';
+    const idxDefault = labels.indexOf(curMes);
+    selA.value = curSelA && labels.includes(curSelA) ? curSelA : (labels[idxDefault] || labels[labels.length - 1] || '');
+    selB.value = curSelB && labels.includes(curSelB) ? curSelB : (labels[idxDefault > 0 ? idxDefault - 1 : Math.max(0, labels.length - 2)] || '');
+  }
+
+  _renderCompareData(d);
+}
+
+function prettyMonth(m) {
+  const [y, mo] = String(m || '').split('-').map(Number);
+  if (!y || !mo) return m;
+  return new Date(y, mo - 1, 1).toLocaleDateString('es-CO', { month: 'long', year: 'numeric' });
+}
+
+function _renderCompareData(d) {
+  if (!d) d = _data;
+  if (!d) return;
+  const sm = d.series?.monthly || {};
+  const labels  = sm.labels  || [];
+  const incomes  = sm.income  || [];
+  const expenses = sm.expense || [];
+
+  const selA = $('compareSelA');
+  const selB = $('compareSelB');
+  const mesA = selA?.value || '';
+  const mesB = selB?.value || '';
+  const idxA = labels.indexOf(mesA);
+  const idxB = labels.indexOf(mesB);
+
+  const dataA = idxA >= 0 ? { income: incomes[idxA] || 0, expense: expenses[idxA] || 0, label: labels[idxA] } : null;
+  const dataB = idxB >= 0 ? { income: incomes[idxB] || 0, expense: expenses[idxB] || 0, label: labels[idxB] } : null;
+
+  setText('compareMonthA', dataA ? prettyMonth(dataA.label) : (mesA || 'Mes A'));
+  setText('compareMonthB', dataB ? prettyMonth(dataB.label) : (mesB || 'Mes B'));
+
+  const renderCompareData = (elId, data, prevData) => {
+    const el = $(elId);
+    if (!el || !data) { if (el) el.innerHTML = '<div class="empty-state"><p>Sin datos para este periodo</p></div>'; return; }
+    const savRate = data.income > 0 ? ((data.income - data.expense) / data.income * 100).toFixed(1) : '0.0';
+    const delta = (field) => {
+      if (!prevData) return '';
+      const diff = data[field] - prevData[field];
+      const pct = prevData[field] > 0 ? (diff / prevData[field] * 100).toFixed(1) : '—';
+      const cls = diff === 0 ? 'delta-flat' : (field === 'expense' ? (diff > 0 ? 'delta-down' : 'delta-up') : (diff > 0 ? 'delta-up' : 'delta-down'));
+      const sign = diff >= 0 ? '+' : '';
+      return `<span class="compare-delta ${cls}">${sign}${pct}%</span>`;
+    };
+    el.innerHTML = `
+      <div class="compare-stat"><span>Ingresos</span><div style="display:flex;align-items:center;gap:8px"><span class="mono" style="color:var(--emerald);font-weight:600">${COP.format(data.income)}</span>${delta('income')}</div></div>
+      <div class="compare-stat"><span>Gastos</span><div style="display:flex;align-items:center;gap:8px"><span class="mono" style="color:var(--red);font-weight:600">${COP.format(data.expense)}</span>${delta('expense')}</div></div>
+      <div class="compare-stat"><span>Ahorro neto</span><span class="mono" style="font-weight:600;color:${(data.income-data.expense)>=0?'var(--emerald)':'var(--red)'}">${COP.format(data.income - data.expense)}</span></div>
+      <div class="compare-stat"><span>Tasa de ahorro</span><span class="mono" style="font-weight:600">${savRate}%</span></div>
+    `;
+  };
+
+  renderCompareData('compareDataA', dataA, dataB);
+  renderCompareData('compareDataB', dataB, null);
+
+  // Rebuild trend chart for comparison view
+  if (_charts.chartTrendCompare) { _charts.chartTrendCompare.destroy(); delete _charts.chartTrendCompare; }
+  const ct = $('chartTrendCompare');
+  if (ct && labels.length) {
+    _charts.chartTrendCompare = new Chart(ct, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Ingresos', data: incomes,  borderColor: '#00d4aa', backgroundColor: 'rgba(0,212,170,.05)', fill: false, tension: .4, pointRadius: 3 },
+          { label: 'Gastos',   data: expenses, borderColor: '#ff4d6d', backgroundColor: 'rgba(255,77,109,.05)', fill: false, tension: .4, pointRadius: 3 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8 } } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { ticks: { callback: v => compact(v) }, grid: { color: 'rgba(255,255,255,0.04)' } }
+        }
+      }
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// GEMINI API KEY — UI
+// ═══════════════════════════════════════════════════════
+function loadGeminiKeyStatus() {
+  google.script.run
+    .withSuccessHandler(r => {
+      const el = $('geminiKeyStatus');
+      if (!el) return;
+      if (r.configured) {
+        el.innerHTML = `<span style="color:var(--emerald)"><i class="fas fa-circle-check"></i> API key configurada: <code style="font-family:monospace;font-size:11px">${esc(r.masked)}</code></span>`;
+      } else {
+        el.innerHTML = `<span style="color:var(--gold)"><i class="fas fa-triangle-exclamation"></i> API key no configurada. La clasificación IA y el chatbot no funcionarán.</span>`;
+      }
+    })
+    .withFailureHandler(() => {})
+    .getGeminiKeyStatus();
+}
+
+function guardarGeminiKeyUI() {
+  const key = ($('cfgGeminiKey')?.value || '').trim();
+  if (!key) { toast('Ingresa una API key válida', 'error'); return; }
+  google.script.run
+    .withSuccessHandler(() => {
+      toast('API key de Gemini guardada correctamente', 'success');
+      $('cfgGeminiKey').value = '';
+      loadGeminiKeyStatus();
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .guardarGeminiApiKey(key);
+}
+
+function toggleGeminiKeyVisibility() {
+  const inp = $('cfgGeminiKey');
+  const icon = $('geminiKeyEye');
+  if (!inp) return;
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    if (icon) icon.className = 'fas fa-eye-slash';
+  } else {
+    inp.type = 'password';
+    if (icon) icon.className = 'fas fa-eye';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// CHATBOT — UI
+// ═══════════════════════════════════════════════════════
+let _chatOpen = false;
+
+function toggleChatbot() {
+  _chatOpen = !_chatOpen;
+  const panel = $('chatbotPanel');
+  const icon  = $('chatbotBtnIcon');
+  if (panel) panel.style.display = _chatOpen ? 'flex' : 'none';
+  if (icon)  icon.className = _chatOpen ? 'fas fa-xmark' : 'fas fa-comments';
+  if (_chatOpen) setTimeout(() => { const i = $('chatInput'); if (i) i.focus(); }, 150);
+}
+
+function sendChatMessage() {
+  const input = $('chatInput');
+  const msg = (input?.value || '').trim();
+  if (!msg) return;
+  input.value = '';
+
+  appendChatMsg(msg, 'user');
+
+  // Typing indicator
+  const typingId = 'typing_' + Date.now();
+  const typingEl = document.createElement('div');
+  typingEl.className = 'chat-msg typing';
+  typingEl.id = typingId;
+  typingEl.innerHTML = '<div class="chat-typing-dots"><span></span><span></span><span></span></div>';
+  $('chatMessages').appendChild(typingEl);
+  scrollChatBottom();
+
+  const mes = $('filtroMes')?.value || new Date().toISOString().slice(0, 7);
+
+  google.script.run
+    .withSuccessHandler(r => {
+      const typing = $(typingId);
+      if (typing) typing.remove();
+      appendChatMsg(r.reply || 'Sin respuesta', 'bot');
+    })
+    .withFailureHandler(err => {
+      const typing = $(typingId);
+      if (typing) typing.remove();
+      appendChatMsg('Error: ' + (err.message || 'No se pudo conectar'), 'bot');
+    })
+    .chatbotQuery(msg, mes);
+}
+
+function appendChatMsg(text, role) {
+  const el = document.createElement('div');
+  el.className = 'chat-msg ' + role;
+  // Render basic markdown: **bold**, *italic*, newlines
+  el.innerHTML = esc(text)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/\n/g, '<br>');
+  $('chatMessages').appendChild(el);
+  scrollChatBottom();
+}
+
+function scrollChatBottom() {
+  const el = $('chatMessages');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+// ═══════════════════════════════════════════════════════
+// TECLADO — Ctrl+K / Cmd+K abre nueva transacción
+// ═══════════════════════════════════════════════════════
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    openModal();
+  }
+  if (e.key === 'Escape') {
+    closeModal();
+    closeEmailEditModal();
+    closeEditTxnModal();
+    closeEditInvModal();
+    closeNewInvModal();
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// PÁGINA CONFIGURACIÓN
+// ═══════════════════════════════════════════════════════
+let _cfgData = null;
+
+function loadConfigPage() {
+  google.script.run
+    .withSuccessHandler(d => { _cfgData = d; renderConfigPage(d); })
+    .withFailureHandler(e => toast('Error cargando configuración: ' + e.message, 'error'))
+    .getConfigData();
+  loadGeminiKeyStatus();
+}
+
+function renderConfigPage(d) {
+  // Cuentas
+  const cfgCuentasList = $('cfgCuentasList');
+  if (cfgCuentasList) {
+    cfgCuentasList.innerHTML = (d.cuentas || []).map(c => `
+      <div class="account-card" style="cursor:pointer" onclick="loadCuentaForm('${esc(c.nombre)}','${esc(c.tipo)}','${esc(c.institucion||'')}',${c.saldo||0})">
+        <div>
+          <div class="account-name">${esc(c.nombre)}</div>
+          <div class="account-type">${esc(c.tipo)} · ${esc(c.moneda)}</div>
+        </div>
+        <div style="font-family:'DM Mono';font-size:14px;color:${c.activa ? 'var(--emerald)' : 'var(--text-muted)'}">${COP.format(c.saldo)}</div>
+      </div>
+    `).join('') || '<div class="empty-state"><i class="fas fa-wallet"></i><p>Sin cuentas</p></div>';
+  }
+
+  // Categorías
+  const cfgCatList = $('cfgCatList');
+  if (cfgCatList) {
+    cfgCatList.innerHTML = (d.categorias || []).map(c => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:16px">${c.icono || '•'}</span>
+          <div>
+            <div style="font-size:13px;font-weight:500">${esc(c.nombre)}</div>
+            <div style="font-size:11px;color:var(--text-muted)">${esc(c.grupo)}</div>
+          </div>
+        </div>
+        <button class="btn btn-danger btn-sm btn-icon" onclick="eliminarCategoriaUI('${esc(c.id)}')" title="Eliminar">
+          <i class="fas fa-trash" style="font-size:11px"></i>
+        </button>
+      </div>
+    `).join('') || '<div class="empty-state"><i class="fas fa-tags"></i><p>Sin categorías</p></div>';
+  }
+
+  // Settings
+  const s = d.settings || {};
+  setInputVal('cfgSalario',     s.salario_mensual     || 0);
+  setInputVal('cfgMonedaBase',  s.moneda_base          || 'COP');
+  setInputVal('cfgGmailLabel',  s.etiqueta_gmail       || 'gastos');
+  setInputVal('cfgUmbral',      s.umbral_auto_aprobacion || 0.88);
+  setInputVal('cfgProveedorIA', s.proveedor_ia         || 'gemini');
+}
+
+function setInputVal(id, val) {
+  const el = $(id);
+  if (!el) return;
+  el.value = val;
+}
+
+function loadCuentaForm(nombre, tipo, inst, saldo) {
+  setInputVal('cfgCuentaNombre', nombre);
+  setInputVal('cfgCuentaTipo',   tipo);
+  setInputVal('cfgCuentaInst',   inst);
+  setInputVal('cfgCuentaSaldo',  saldo);
+}
+
+function guardarCuentaUI() {
+  const nombre = ($('cfgCuentaNombre')?.value || '').trim();
+  if (!nombre) { toast('Nombre de cuenta requerido', 'error'); return; }
+  const form = {
+    nombre,
+    tipo:       $('cfgCuentaTipo')?.value || 'efectivo',
+    institucion:$('cfgCuentaInst')?.value || '',
+    moneda:     'COP',
+    saldo:      parseFloat($('cfgCuentaSaldo')?.value) || 0,
+    activa:     true
+  };
+  toast('Guardando cuenta...', 'info');
+  google.script.run
+    .withSuccessHandler(r => {
+      toast(r.action === 'created' ? 'Cuenta creada' : 'Cuenta actualizada', 'success');
+      loadConfigPage();
+      refreshData();
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .guardarCuenta(form);
+}
+
+function guardarCategoriaUI() {
+  const nombre = ($('cfgCatNombre')?.value || '').trim();
+  if (!nombre) { toast('Nombre de categoría requerido', 'error'); return; }
+  const form = {
+    nombre,
+    grupo:    $('cfgCatGrupo')?.value    || 'gasto',
+    icono:    $('cfgCatIcono')?.value    || '',
+    keywords: $('cfgCatKeywords')?.value || '',
+    color:    '#64748b'
+  };
+  google.script.run
+    .withSuccessHandler(() => {
+      toast('Categoría guardada', 'success');
+      $('cfgCatNombre').value = '';
+      $('cfgCatIcono').value  = '';
+      $('cfgCatKeywords').value = '';
+      loadConfigPage();
+      refreshData();
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .guardarCategoria(form);
+}
+
+function eliminarCategoriaUI(catId) {
+  if (!confirm('¿Eliminar esta categoría? No se podrá deshacer.')) return;
+  google.script.run
+    .withSuccessHandler(() => { toast('Categoría eliminada', 'success'); loadConfigPage(); refreshData(); })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .eliminarCategoria(catId);
+}
+
+function guardarConfigUI() {
+  const items = [
+    ['salario_mensual',           $('cfgSalario')?.value     || '0'],
+    ['moneda_base',               $('cfgMonedaBase')?.value  || 'COP'],
+    ['etiqueta_gmail',            $('cfgGmailLabel')?.value  || 'gastos'],
+    ['umbral_auto_aprobacion',    $('cfgUmbral')?.value      || '0.88'],
+    ['proveedor_ia',              $('cfgProveedorIA')?.value || 'gemini']
+  ];
+  let pending = items.length;
+  let errors  = 0;
+  items.forEach(([clave, valor]) => {
+    google.script.run
+      .withSuccessHandler(() => {
+        pending--;
+        if (pending === 0) {
+          if (errors === 0) toast('Ajustes guardados correctamente', 'success');
+          else toast(`Ajustes guardados con ${errors} error(es)`, 'error');
+          refreshData();
+        }
+      })
+      .withFailureHandler(() => { errors++; pending--; })
+      .guardarConfiguracion(clave, valor);
+  });
+}
+
+function recalcularSaldosUI() {
+  toast('Recalculando saldos...', 'info');
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.ok) { toast('Saldos recalculados', 'success'); refreshData(); }
+      else toast('Error: ' + r.error, 'error');
+    })
+    .withFailureHandler(e => toast('Error: ' + e.message, 'error'))
+    .recalcularSaldos();
+}
+
+function actualizarFXUI() {
+  toast('Actualizando tipos de cambio...', 'info');
+  google.script.run
+    .withSuccessHandler(r => {
+      if (r.ok) toast(`FX actualizado: ${r.updated} pares`, 'success');
+      else toast('Error actualizando FX', 'error');
+    })
+    .withFailureHandler(e => toast('Error FX: ' + e.message, 'error'))
+    .actualizarFX();
+}
+</script>
