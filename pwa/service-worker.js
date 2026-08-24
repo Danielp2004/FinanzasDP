@@ -1,17 +1,14 @@
 /**
- * service-worker.js — Cache del "app shell" (HTML/CSS/JS propios) para que
- * la PWA abra instantáneo y funcione sin conexión para lo visual.
- *
- * Las llamadas POST al Web App de Apps Script (los datos financieros) NUNCA
- * se cachean aquí — siempre van a red, para no mostrar saldos desactualizados.
+ * service-worker.js — Cache del shell instalable (solo index.html + manifest
+ * + íconos) para que la PWA abra instantáneo. El contenido real de la app
+ * (dashboard, movimientos, saldos) vive dentro de un <iframe> que apunta al
+ * Web App de Apps Script (script.google.com) — eso NUNCA se cachea aquí,
+ * siempre va directo a red, para no mostrar datos financieros desactualizados.
  */
-const CACHE_NAME = 'finanzas-ai-shell-v1';
+const CACHE_NAME = 'finanzas-ai-shell-v2';
 const SHELL_FILES = [
   './',
   './index.html',
-  './app.js',
-  './gs-shim.js',
-  './config.js',
   './manifest.json'
 ];
 
