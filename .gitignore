@@ -1,1 +1,12 @@
-node_modules/ 
+node_modules/
+
+# Datos financieros personales — nunca deben subirse
+movimientos.csv
+*.pdf
+documento_unlocked.pdf
+
+# Notebooks de prueba con posibles claves/salidas
+test_gemini.ipynb
+
+# Config de Claude Code local
+.claude/

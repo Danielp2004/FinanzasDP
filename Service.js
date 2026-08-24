@@ -23,14 +23,25 @@ function clasificarConIA_(data, shCfg) {
   const cached = CacheService.getScriptCache().get('ai_' + fp);
   if (cached) return JSON.parse(cached);
 
-  let result;
+  let result = null;
+
+  // 1º) MEMORIA APRENDIDA de tu historial (instantánea, gratis). Si está segura,
+  //     se usa directamente sin gastar llamadas a la IA.
   try {
-    result = provider === 'gemini'
-      ? _callGemini_(data, shCfg)
-      : _rulesClassify_(data, shCfg);
-  } catch(e) {
-    Logger.log('IA error → fallback reglas: ' + e);
-    result = _rulesClassify_(data, shCfg);
+    const aprendido = _learnedClassify_(data);
+    if (aprendido) result = aprendido;
+  } catch(e) { Logger.log('learned error: ' + e); }
+
+  // 2º) Si la memoria no supo, usar el proveedor configurado (IA o reglas).
+  if (!result) {
+    try {
+      result = provider === 'gemini'
+        ? _callGemini_(data, shCfg)
+        : _rulesClassify_(data, shCfg);
+    } catch(e) {
+      Logger.log('IA error → fallback reglas: ' + e);
+      result = _rulesClassify_(data, shCfg);
+    }
   }
 
   // Normalizar
@@ -41,9 +52,9 @@ function clasificarConIA_(data, shCfg) {
 
 // ─── Gemini 1.5 Flash ────────────────────────────────
 function _callGemini_(data, shCfg) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const apiKey = _aiApiKey_();
   if (!apiKey) {
-    Logger.log('⚠️ GEMINI_API_KEY no configurada → usando reglas');
+    Logger.log('⚠️ Clave de IA no configurada → usando reglas');
     return _rulesClassify_(data, shCfg);
   }
 
@@ -71,25 +82,17 @@ REGLAS IMPORTANTES:
 RESPONDE SOLO CON JSON VÁLIDO (sin markdown, sin explicaciones):
 {"type":"expense|income|transfer","category":"nombre exacto de la categoría","confidence":0.00,"merchant":"nombre limpio del comercio","notes":"razón muy breve"}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.1, maxOutputTokens: 256, responseMimeType: 'application/json' }
   };
 
-  const res = UrlFetchApp.fetch(url, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  });
-
-  if (res.getResponseCode() !== 200) {
-    throw new Error('Gemini HTTP ' + res.getResponseCode());
+  const res = aiGenerateContent_(AI_CFG.MODEL, payload, apiKey);
+  if (res.code !== 200) {
+    throw new Error('IA HTTP ' + res.code);
   }
 
-  const json = JSON.parse(res.getContentText());
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+  const text = res.text || '{}';
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
 
   return {
@@ -179,7 +182,7 @@ function _rulesClassify_(data, shCfg) {
 function _getCategories_() {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sh = ss.getSheetByName(CFG.SHEETS.CATEGORIAS) || ss.getSheetByName('Categories');
+    const sh = ss.getSheetByName(CFG.SHEETS.CATEGORIAS);
     if (!sh) throw new Error('no sheet');
     const data = sh.getDataRange().getValues();
     return data.slice(1).map(r => String(r[1]||'').trim()).filter(Boolean);
@@ -230,15 +233,19 @@ function getExchangeRate_(from, to) {
 function _saveFXRate_(base, target, rate) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sh = ss.getSheetByName(CFG.SHEETS.TIPOS_CAMBIO) || ss.getSheetByName('FX_Rates');
+    const sh = ss.getSheetByName(CFG.SHEETS.TIPOS_CAMBIO);
     if (!sh) return;
     sh.appendRow([base, target, rate, Utilities.formatDate(new Date(), CFG.TZ, 'yyyy-MM-dd'), 'open.er-api.com']);
   } catch(e) {}
 }
 
-function actualizarFX() {
+function actualizarFXServicio_() {
   const pairs = [['USD','COP'],['EUR','COP'],['USD','EUR']];
+  // Limpiar el caché FX de estos pares (removeAll requiere un array de claves).
+  try {
+    CacheService.getScriptCache().removeAll(pairs.map(([b,t]) => `fx_${b}_${t}`));
+  } catch(e) { Logger.log('Error limpiando cache FX: ' + e.message); }
   const results = pairs.map(([b,t]) => ({ pair:`${b}/${t}`, rate: getExchangeRate_(b,t) }));
-  CacheService.getScriptCache().removeAll();
+  clearCacheForMonth();
   return { ok: true, rates: results };
 }

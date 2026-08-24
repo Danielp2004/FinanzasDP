@@ -10,8 +10,8 @@
 function generarReporteMensual(mes) {
   const tz  = CFG.TZ;
   const ss  = SpreadsheetApp.getActiveSpreadsheet();
-  const shT = ss.getSheetByName(CFG.SHEETS.TXN);
-  const shA = ss.getSheetByName(CFG.SHEETS.ACCOUNTS);
+  const shT = ss.getSheetByName(CFG.SHEETS.MOV);
+  const shA = ss.getSheetByName(CFG.SHEETS.CUENTAS);
 
   const mesTarget = mes || Utilities.formatDate(new Date(), tz, 'yyyy-MM');
   const txns      = readSheet_(shT);
@@ -107,20 +107,20 @@ function calcHealthScore_(income, expense, savings, txnCount) {
 // ═══════════════════════════════════════════════════════
 function actualizarSaldoCuenta(accountName, nuevoSaldo) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sh = ss.getSheetByName(CFG.SHEETS.ACCOUNTS);
-  if (!sh) throw new Error('Hoja Accounts no existe');
+  const sh = ss.getSheetByName(CFG.SHEETS.CUENTAS);
+  if (!sh) throw new Error('Hoja Cuentas no existe');
 
   const data = sh.getDataRange().getValues();
   const hdr  = data[0].map((h,i) => [String(h).trim().toLowerCase(), i]);
   const nameIdx = hdr.find(([h]) => h === 'name')?.[1];
   const balIdx  = hdr.find(([h]) => h === 'balance')?.[1];
 
-  if (nameIdx == null || balIdx == null) throw new Error('Columnas name/balance no encontradas');
+  if (nameIdx == null || balIdx == null) throw new Error('Columnas nombre/saldo no encontradas');
 
   for (let r = 1; r < data.length; r++) {
     if (String(data[r][nameIdx]).trim().toLowerCase() === accountName.trim().toLowerCase()) {
       sh.getRange(r + 1, balIdx + 1).setValue(nuevoSaldo);
-      CacheService.getScriptCache().removeAll();
+      clearCacheForMonth();
       return { ok: true, account: accountName, newBalance: nuevoSaldo };
     }
   }
@@ -133,9 +133,9 @@ function actualizarSaldoCuenta(accountName, nuevoSaldo) {
 // ═══════════════════════════════════════════════════════
 function recalcularSaldosDesdeTxns() {
   const ss  = SpreadsheetApp.getActiveSpreadsheet();
-  const shT = ss.getSheetByName(CFG.SHEETS.TXN);
-  const shA = ss.getSheetByName(CFG.SHEETS.ACCOUNTS);
-  if (!shT || !shA) throw new Error('Faltan hojas Transactions o Accounts');
+  const shT = ss.getSheetByName(CFG.SHEETS.MOV);
+  const shA = ss.getSheetByName(CFG.SHEETS.CUENTAS);
+  if (!shT || !shA) throw new Error('Faltan hojas Movimientos o Cuentas');
 
   const txns    = readSheet_(shT);
   const accData = shA.getDataRange().getValues();
@@ -166,7 +166,7 @@ function recalcularSaldosDesdeTxns() {
     }
   }
 
-  CacheService.getScriptCache().removeAll();
+  clearCacheForMonth();
   return { ok: true, updated };
 }
 
@@ -175,8 +175,8 @@ function recalcularSaldosDesdeTxns() {
 // ═══════════════════════════════════════════════════════
 function guardarPresupuesto(form) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sh = ss.getSheetByName(CFG.SHEETS.BUDGETS);
-  if (!sh) throw new Error('Hoja Budgets no existe');
+  const sh = ss.getSheetByName(CFG.SHEETS.PRESUPUESTO);
+  if (!sh) throw new Error('Hoja Presupuestos no existe');
 
   const row = [
     Utilities.getUuid(),                    // budget_id
@@ -189,7 +189,7 @@ function guardarPresupuesto(form) {
 
   const nr = nextEmpty_(sh, 2);
   sh.getRange(nr, 1, 1, row.length).setValues([row]);
-  CacheService.getScriptCache().removeAll();
+  clearCacheForMonth();
   return { ok: true };
 }
 
@@ -198,7 +198,7 @@ function guardarPresupuesto(form) {
 // ═══════════════════════════════════════════════════════
 function detectarDuplicados(diasVentana) {
   const ss   = SpreadsheetApp.getActiveSpreadsheet();
-  const shT  = ss.getSheetByName(CFG.SHEETS.TXN);
+  const shT  = ss.getSheetByName(CFG.SHEETS.MOV);
   const txns = readSheet_(shT).filter(r => r.date instanceof Date);
   const ventana = (diasVentana || 3) * 86400000; // ms
 
@@ -223,7 +223,7 @@ function detectarDuplicados(diasVentana) {
 // ═══════════════════════════════════════════════════════
 /**
  * Pega el contenido CSV en la celda A1 de una hoja temporal "ImportCSV"
- * y llama esta función para importar a Transactions.
+ * y llama esta función para importar a Movimientos.
  * Formato esperado: fecha,descripción,débito,crédito
  */
 function importarCSVBanco() {
@@ -231,7 +231,7 @@ function importarCSVBanco() {
   const shImp = ss.getSheetByName('ImportCSV');
   if (!shImp) throw new Error('Crea una hoja llamada ImportCSV y pega tu CSV allí');
 
-  const shT   = ss.getSheetByName(CFG.SHEETS.TXN);
+  const shT   = ss.getSheetByName(CFG.SHEETS.MOV);
   const shCfg = ss.getSheetByName(CFG.SHEETS.CONFIG);
   const baseCur = getSettingEs_(shCfg, 'moneda_base', 'COP');
 
@@ -280,7 +280,7 @@ function importarCSVBanco() {
     imported++;
   }
 
-  CacheService.getScriptCache().removeAll();
+  clearCacheForMonth();
   return { ok: true, imported };
 }
 
@@ -289,7 +289,7 @@ function importarCSVBanco() {
 // ═══════════════════════════════════════════════════════
 function actualizarPrecioActivo(assetId, nuevoPrecio) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sh = ss.getSheetByName(CFG.SHEETS.PORTFOLIO);
+  const sh = ss.getSheetByName(CFG.SHEETS.INVERSIONES);
   if (!sh) throw new Error('Hoja Inversiones no existe');
 
   const data = sh.getDataRange().getValues();
@@ -304,7 +304,7 @@ function actualizarPrecioActivo(assetId, nuevoPrecio) {
     }
   }
 
-  CacheService.getScriptCache().removeAll();
+  clearCacheForMonth();
   return { ok: true, updated };
 }
 
@@ -315,7 +315,7 @@ function resumenSemanal() {
   const tz  = CFG.TZ;
   const hoy = new Date();
   const ss  = SpreadsheetApp.getActiveSpreadsheet();
-  const shT = ss.getSheetByName(CFG.SHEETS.TXN);
+  const shT = ss.getSheetByName(CFG.SHEETS.MOV);
   const txns= readSheet_(shT);
 
   // Últimos 7 días

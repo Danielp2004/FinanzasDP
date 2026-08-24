@@ -1,4 +1,3 @@
-<script>
 /**
  * FINANZAS AI PRO — app.html
  * Frontend JS — Navegación · Charts · Formularios · Exports
@@ -5938,4 +5937,3 @@ function _closeFeatModal(id) {
   const el = document.getElementById(id);
   if (el) el.classList.remove('open');
 }
-</script>

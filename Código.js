@@ -10,7 +10,7 @@ function obtenerNoticiasInversion(simbolo) {
   const noticias = [];
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const shCfg = ss.getSheetByName(CFG.SHEETS.CONFIG);
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const apiKey = _aiApiKey_();
   let rawTextForAI = "";
 
   try {
@@ -50,20 +50,13 @@ function obtenerNoticiasInversion(simbolo) {
   if (apiKey && rawTextForAI.length > 20) {
     try {
       const prompt = `Analiza el sentimiento de estas noticias financieras para el activo "${simbolo}" y dame un resumen ejecutivo de 2 frases indicando si la tendencia es alcista, bajista o neutral:\n${rawTextForAI}`;
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
       const payload = {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.2, maxOutputTokens: 150 }
       };
-      const res = UrlFetchApp.fetch(url, {
-        method: 'post',
-        contentType: 'application/json',
-        payload: JSON.stringify(payload),
-        muteHttpExceptions: true
-      });
-      if (res.getResponseCode() === 200) {
-        const aiJson = JSON.parse(res.getContentText());
-        const aiAnalysis = aiJson.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const res = aiGenerateContent_(AI_CFG.MODEL, payload, apiKey);
+      if (res.code === 200) {
+        const aiAnalysis = res.text || "";
         if (aiAnalysis) {
           noticias.unshift({
             title: "🤖 ANÁLISIS IA: " + aiAnalysis.trim(),
@@ -87,7 +80,7 @@ function obtenerNoticiasInversion(simbolo) {
  * Yahoo Finance: https://query1.finance.yahoo.com/v7/finance/quote?symbols=SYM
  * Google Finance: solo vía fórmula en Sheets, no API pública
  */
-function actualizarPreciosInversiones() {
+function actualizarPreciosInversionesBasico_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(CFG.SHEETS.INVERSIONES);
   if (!sh) throw new Error('Hoja Inversiones no existe');
@@ -168,45 +161,59 @@ function actualizarNotaInversion(inversion_id, nota) {
  */
 
 // ═══════════════════════════════════════════════════════
+// RPC WHITELIST — PWA (ver doPost)
+// ═══════════════════════════════════════════════════════
+// Funciones invocables desde el frontend vía action = nombre exacto.
+// Cualquier función nueva que la UI necesite llamar debe agregarse aquí
+// explícitamente; nunca se permite ejecutar una función arbitraria.
+const RPC_WHITELIST_ = [
+  'actualizarEstadoHistorialUI','actualizarFX','actualizarPrecioManualInversion',
+  'aprobarEmail','cargarDatosDeEjemplo','cargarReviewExtractoUI','categorizarMovimientosUI',
+  'clearAndGetDataAPI','diagnosticarDatos','editarMovimiento','eliminarCategoria',
+  'eliminarCorreoGasto','eliminarHistorialExtractoUI','eliminarInversionEs','eliminarTransaccion',
+  'exportCSV','getAlertasActivasUI','getConfigData','getDataAPILight','getEmailLogs',
+  'getGeminiKeyStatus','getHistorialExtractosUI','getPrecioAutoMode','getTrucosFinancierosUI',
+  'guardarCategoria','guardarConfiguracion','guardarCorreoEditado','guardarCuenta',
+  'guardarGeminiApiKey','guardarInversionEs','guardarPresupuestosLote','guardarTransaccionesBatchUI',
+  'limpiarDuplicadosHistorialUI','marcarMovimientoConciliadoUI','marcarMovimientosBatchUI',
+  'probarClaveIA','procesarPDFUI','proyectarSaldoUI','recalcularSaldos','setPrecioAutoMode'
+];
+
+// ═══════════════════════════════════════════════════════
 // CONFIGURACIÓN GLOBAL
 // ═══════════════════════════════════════════════════════
 const CFG = {
   TZ: Session.getScriptTimeZone(),
   GMAIL_LABEL: 'gastos',
-  CACHE_TTL: 300,
+  CACHE_TTL: 600,
   AUTO_APPROVE_THRESHOLD: 0.88,  // Confianza mínima para auto-aprobación
   DEFAULT_ACCOUNT: 'Bancolombia Ahorro',
   APP_NAME: 'Finanzas AI Pro',
   SHEETS: {
     MOV:        'Movimientos',
-    TXN:        'Movimientos',
     CUENTAS:    'Cuentas',
-    ACCOUNTS:   'Cuentas',
-    CATEGORIAS: 'Categorías',
-    PRESUPUESTO:'Presupuestos',
-    BUDGETS:    'Presupuestos',
+    CATEGORIAS: 'Categorias',
+    PRESUPUESTO:'Presupuesto',
     INVERSIONES:'Inversiones',
-    PORTFOLIO:  'Inversiones',
-    TIPOS_CAMBIO:'Tipos_Cambio',
-    CORREOS:    'Correos_Gastos',
-    CONFIG:     'Configuración'
+    TIPOS_CAMBIO:'TiposCambio',
+    CORREOS:    'Correos',
+    CONFIG:     'Config',
+    METAS:      'Metas',
+    RECURRENTES:'Recurrentes',
+    DEUDAS:     'Deudas'
   }
 };
 
 // ═══════════════════════════════════════════════════════
 // INICIALIZACIÓN — Ejecutar UNA vez manualmente
 // ═══════════════════════════════════════════════════════
-function initializeSpreadsheet() {
-  return inicializarSheetsEspanol({ conEjemplos: true });
-}
-
 /**
  * Inicializa la app con una sola estructura (todo en español).
  * - Crea/asegura solo las hojas necesarias.
  * - No crea hojas en inglés.
  * - Opcional: carga movimientos de prueba para ver la Web App con datos.
  */
-function inicializarSheetsEspanol(opts) {
+function inicializarProyecto(opts) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   opts = opts || {};
 
@@ -291,6 +298,25 @@ function inicializarSheetsEspanol(opts) {
     'mov_id','snippet'
   ]);
 
+  // ── Metas de ahorro ──────────────────────────────────────────────────────
+  sheet(CFG.SHEETS.METAS, [
+    'meta_id','nombre','descripcion','monto_objetivo','monto_actual',
+    'fecha_inicio','fecha_objetivo','categoria_exclusion','activa','creado_el'
+  ]);
+
+  // ── Gastos recurrentes ───────────────────────────────────────────────────
+  sheet(CFG.SHEETS.RECURRENTES, [
+    'rec_id','nombre','monto','tipo','categoria','cuenta',
+    'dia_del_mes','activo','ultima_vez','alerta_dias_antes','notas','creado_el'
+  ]);
+
+  // ── Deudas y cuotas ──────────────────────────────────────────────────────
+  sheet(CFG.SHEETS.DEUDAS, [
+    'deuda_id','nombre','tipo','entidad','saldo_inicial','saldo_actual',
+    'tasa_mensual','cuota_mensual','fecha_inicio','fecha_fin',
+    'dia_corte','dia_pago','cuenta_pago','activa','notas','creado_el'
+  ]);
+
   if (opts.conEjemplos) cargarDatosDemo_();
 
   Logger.log('✅ Estructura inicializada correctamente');
@@ -301,11 +327,25 @@ function inicializarSheetsEspanol(opts) {
 // WEB APP ENTRY POINTS
 // ═══════════════════════════════════════════════════════
 function doGet(e) {
+  // ?diag=1  → página de diagnóstico mínima (sin Chart.js, sin app.html)
+  if (e && e.parameter && e.parameter.diag === '1') {
+    return HtmlService.createHtmlOutputFromFile('Diag')
+      .setTitle('Diagnóstico')
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+      .setSandboxMode(HtmlService.SandboxMode.IFRAME);
+  }
+  // ?install=1  → landing de onboarding para nuevos usuarios
+  if (e && e.parameter && e.parameter.install === '1') {
+    return HtmlService.createTemplateFromFile('Onboarding')
+      .evaluate()
+      .setTitle('Instalar Finanzas AI Pro')
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+      .setSandboxMode(HtmlService.SandboxMode.IFRAME);
+  }
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
     .setTitle('Finanzas AI Pro')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
     .setSandboxMode(HtmlService.SandboxMode.IFRAME);
 }
 
@@ -315,8 +355,10 @@ function include(filename) {
 
 function doPost(e) {
   try {
-    const body   = JSON.parse(e.postData?.contents || '{}');
-    const action = e.parameter?.action || body.action;
+    const body   = parseApiRequestBody_(e);
+    const action = String(e.parameter?.action || body.action || '').trim();
+    if (!action) return jsonOut_({ ok: false, error: 'Accion requerida' });
+    assertAuthorizedApiRequest_(action, body, e);
 
     // ── Autenticación por API key (opcional) ──────────────
     // Guarda la clave en Propiedades del script: SHORTCUTS_API_KEY
@@ -330,6 +372,7 @@ function doPost(e) {
     }
 
     const handlers = {
+      api_status:   () => getApiStatus_(),
       // ── Compatibilidad anterior ──
       sync_email:   () => syncGmailLabel_(CFG.GMAIL_LABEL),
       save_txn:     () => guardarTransaccion(body.data || body),
@@ -340,23 +383,67 @@ function doPost(e) {
       quick_gasto:  () => shortcutQuickTxn_(body, 'gasto'),
       quick_ingreso:() => shortcutQuickTxn_(body, 'ingreso'),
       nueva_txn:    () => shortcutQuickTxn_(body, body.tipo || 'gasto'),
+      crear_movimiento: () => guardarTransaccion(body.data || body),
 
       // ── Atajos iPhone: consultas ──
       saldo:        () => shortcutSaldo_(),
       resumen_mes:  () => shortcutResumenMes_(body.mes),
       resumen_dia:  () => shortcutResumenDia_(),
       presupuesto:  () => shortcutPresupuesto_(),
+      listar_cuentas: () => listarCuentasAPI_(),
 
       // ── Inversiones ──
       actualizar_precios_inv: () => actualizarPreciosInversiones(),
       noticias_inv:           () => obtenerNoticiasInversion(body.simbolo || ''),
 
+      // ── PDF & Conciliación ──
+      procesar_pdf:           () => procesarExtractoPDF(body),
+      alertas:                () => getAlertasActivas(),
+      chat_ia:                () => chatFinanciero(body.pregunta || '', body.historial || []),
+      trucos_ia:              () => getTrucosFinancieros(),
+      categorizar_ia:         () => categorizarMovimientosSinCategoria(),
+      proyeccion_mes:         () => proyectarSaldoFinMes(),
+
       // ── Reconciliación de saldos ──
       saldo_cuentas:          () => obtenerSaldosParaReconciliar(),
-      reconciliar_saldos:     () => reconciliarSaldosMes(body.ajustes || [])
+      reconciliar_saldos:     () => reconciliarSaldosMes(body.ajustes || []),
+      auditar_extracto:       () => auditarExtractoBancario_(body),
+      importar_extracto:      () => importarExtractoBancario_(body),
+
+      // ── Metas de ahorro ──
+      get_metas:              () => getMetas(),
+      guardar_meta:           () => guardarMeta(body.data || body),
+      aportar_meta:           () => aportarMeta(body.meta_id, body.monto),
+      eliminar_meta:          () => eliminarMeta(body.meta_id),
+
+      // ── Gastos recurrentes ──
+      get_recurrentes:        () => getRecurrentes(),
+      guardar_recurrente:     () => guardarRecurrente(body.data || body),
+      marcar_pagado:          () => marcarRecurrentePagado(body.rec_id, body.crear_movimiento),
+      eliminar_recurrente:    () => eliminarRecurrente(body.rec_id),
+
+      // ── Deudas ──
+      get_deudas:             () => getDeudas(),
+      guardar_deuda:          () => guardarDeuda(body.data || body),
+      pagar_deuda:            () => pagarDeuda(body.deuda_id, body.monto, body.crear_movimiento),
+      eliminar_deuda:         () => eliminarDeuda(body.deuda_id),
+
+      // ── Finanzas completas ──
+      finanzas_completas:     () => getFinanzasCompletas()
     };
 
-    const fn     = handlers[action];
+    let fn = handlers[action];
+
+    // ── Fallback genérico (PWA) ─────────────────────────────────────
+    // El shim google.script.run del frontend manda action = nombre exacto
+    // de la función (p.ej. "getConfigData", "guardarCuenta") y body.args
+    // como el array de argumentos posicionales tal cual los pasaba la UI.
+    // Sólo se permiten funciones ya expuestas a la UI (sufijo *UI o en
+    // esta lista blanca), nunca cualquier función global del proyecto.
+    if (!fn && RPC_WHITELIST_.includes(action) && typeof globalThis[action] === 'function') {
+      fn = () => globalThis[action].apply(null, Array.isArray(body.args) ? body.args : []);
+    }
+
     const result = fn ? fn() : { ok: false, error: `Acción desconocida: "${action}"` };
     return jsonOut_(result);
 
@@ -369,15 +456,33 @@ function doPost(e) {
 // ═══════════════════════════════════════════════════════
 // API PRINCIPAL — getDataAPI
 // ═══════════════════════════════════════════════════════
+function clearAndGetDataAPI(mesFiltro) {
+  try { clearCacheForMonth(); } catch(e) { Logger.log('clearAndGetDataAPI/clear: ' + e); }
+  try {
+    return getDataAPI(mesFiltro);
+  } catch(e) {
+    Logger.log('❌ clearAndGetDataAPI: ' + e + '\n' + (e.stack || ''));
+    return { error: 'Error al cargar datos: ' + (e.message || e), mes: mesFiltro || '', kpis: {} };
+  }
+}
+
 function getDataAPI(mesFiltro) {
   const tz  = CFG.TZ;
   const hoy = new Date();
   const mes = mesFiltro || fmtDate_(hoy, 'yyyy-MM');
 
-  const cacheKey = `data_v2_${mes}`;
-  const cached   = CacheService.getScriptCache().get(cacheKey);
-  if (cached) return JSON.parse(cached);
+  // Lectura de caché protegida (antes estaba fuera del try → un error aquí
+  // hacía que la función lanzara y el frontend recibiera null → "servidor no
+  // devolvió datos").
+  try {
+    const cacheKey0 = `data_v2_${_cacheVersion_()}_${mes}`;
+    const cached = CacheService.getScriptCache().get(cacheKey0);
+    if (cached) return JSON.parse(cached);
+  } catch(e) {
+    Logger.log('getDataAPI cache read: ' + e);
+  }
 
+  const cacheKey = `data_v2_${_cacheVersion_()}_${mes}`;
   try {
     const ss   = SpreadsheetApp.getActiveSpreadsheet();
     const shMov = ss.getSheetByName(CFG.SHEETS.MOV);
@@ -392,18 +497,33 @@ function getDataAPI(mesFiltro) {
 
     // Leer movimientos (español) y normalizar a estructura interna para reutilizar gráficos
     const movsRaw = readSheet_(shMov);
+    // Debug: mostrar las primeras 3 filas raw para diagnóstico
+    if (movsRaw.length > 0) {
+      const sample = movsRaw.slice(0,3);
+      Logger.log('[RAW COLS] keys=' + JSON.stringify(Object.keys(sample[0])));
+      Logger.log('[RAW SAMPLE] ' + JSON.stringify(sample.map(r => ({ grupo: r.grupo, tipo: r.tipo, categoria: r.categoría || r.categoria, monto: r.monto }))));
+    }
     const txns = movsRaw.map(m => {
       const fecha = parseSheetDate_(m.fecha);
-      const rawGroup = normalizeType_(m.grupo);
-      const category = String(m.categoría || m.categoria || 'Otros').trim();
+      const rawGroup = normalizeType_(m.grupo || m.tipo || m.type || '');
+      const category = String(m.categoría || m.categoria || m.category || 'Otros').trim();
       const accountDest = String(m.cuenta_destino || '').trim();
       const asset = String(m.activo_inversion || m['activo_inversión'] || m.activoInversion || m.activo || '').trim();
       const isInvestment = category.toLowerCase().includes('inversion') || accountDest.toLowerCase().includes('broker') || asset !== '';
-      const monto = parseNum_(m.monto);
+      const monto = parseNum_(m.monto || m.amount || m.valor || 0);
+      // Si el tipo no pudo reconocerse, inferir desde categoría y monto
+      const knownTypes = ['income','expense','transfer','investment'];
+      let resolvedType = rawGroup;
+      if (!knownTypes.includes(resolvedType)) {
+        const catLower = category.toLowerCase();
+        if (['ingresos','ingreso','nómina','nomina','salario'].some(k => catLower.includes(k))) resolvedType = 'income';
+        else if (['transferencia','traslado','nequi','daviplata'].some(k => catLower.includes(k))) resolvedType = 'transfer';
+        else resolvedType = monto >= 0 ? 'income' : 'expense';
+      }
       return {
         txn_id: m.mov_id,
         date: fecha,
-        type: isInvestment ? 'investment' : rawGroup,
+        type: isInvestment ? 'investment' : resolvedType,
         category: category,
         description: String(m.descripción || m.descripcion || '').trim(),
         account: String(m.cuenta_origen || m.cuenta || '').trim(),
@@ -411,7 +531,7 @@ function getDataAPI(mesFiltro) {
         source: String(m.fuente || 'manual'),
         status: 'confirmed',
         currency: String(m.moneda || baseCur),
-        amount_base: monto,
+        amount_base: Math.abs(monto),
         referencia: String(m.referencia || ''),
         notas: String(m.notas || '')
       };
@@ -419,31 +539,52 @@ function getDataAPI(mesFiltro) {
 
     const mesTxn = txns.filter(r => r.date instanceof Date && fmtDate_(r.date, 'yyyy-MM') === mes);
 
-    // KPIs del mes
+    // KPIs del mes — expense incluye inversiones (ambos son salidas de dinero)
     const income = mesTxn.filter(r => normalizeType_(r.type) === 'income')
                          .reduce((s, r) => s + parseNum_(r.amount_base), 0);
-    const expense= mesTxn.filter(r => normalizeType_(r.type) === 'expense')
-                         .reduce((s, r) => s + parseNum_(r.amount_base), 0);
+    const expenseOnly = mesTxn.filter(r => normalizeType_(r.type) === 'expense')
+                              .reduce((s, r) => s + parseNum_(r.amount_base), 0);
+    const investments = mesTxn.filter(r => normalizeType_(r.type) === 'investment')
+                              .reduce((s, r) => s + parseNum_(r.amount_base), 0);
+    const expense = expenseOnly + investments;
     const transfers = mesTxn.filter(r => normalizeType_(r.type) === 'transfer')
                             .reduce((s, r) => s + parseNum_(r.amount_base), 0);
 
-    // Por categoría (gastos)
+    // Por categoría (gastos + inversiones — ambos son salida de dinero)
     const byCat  = {};
-    mesTxn.filter(r => normalizeType_(r.type) === 'expense').forEach(r => {
-      const c = String(r.category || 'Otros').trim();
+    const expTxns = mesTxn.filter(r => ['expense','investment'].includes(normalizeType_(r.type)));
+    expTxns.forEach(r => {
+      const t = normalizeType_(r.type);
+      // Las inversiones se agrupan bajo su categoría real (ej: "Inversiones") o la que traigan
+      const c = t === 'investment'
+        ? (String(r.category || '').trim() || 'Inversiones')
+        : String(r.category || 'Otros').trim();
       byCat[c] = (byCat[c] || 0) + parseNum_(r.amount_base);
     });
+    // Debug info para diagnóstico
+    const _debug = {
+      mesTxnCount: mesTxn.length,
+      expenseCount: expTxns.length,
+      byCatKeys: Object.keys(byCat),
+      sampleTypes: mesTxn.slice(0,8).map(r => ({ type: r.type, cat: r.category, amt: r.amount_base })),
+      rawCols: movsRaw.length > 0 ? Object.keys(movsRaw[0]) : [],
+      rawSample: movsRaw.slice(0,3).map(r => ({ grupo: r.grupo, tipo: r.tipo, cat: r.categoría || r.categoria, monto: r.monto }))
+    };
 
     // Cuentas (español)
     const cuentas = readSheet_(shCtas);
     const accountMonthMap = accountSync.byAccountMonth || {};
+    const balancesCalc = accountSync.balances || {};
     const acSaldos = cuentas.filter(r => r.activa !== false && String(r.activa) !== 'false')
       .map(r => {
         const name = String(r.nombre || '').trim();
         const monthStats = accountMonthMap[name] || {};
+        // Usar el saldo CALCULADO en memoria (no el de la hoja, que ya no se
+        // reescribe en cada carga). Si por algo no está, caer al saldo de la hoja.
+        const bal = balancesCalc[name] != null ? balancesCalc[name] : parseNum_(r.saldo);
         return {
           name,
-          bal: parseNum_(r.saldo),
+          bal: bal,
           type: r.tipo,
           initial: parseNum_(r.saldo_inicial),
           deltaMes: monthStats.net || 0,
@@ -534,7 +675,7 @@ function getDataAPI(mesFiltro) {
         if (pm < 1) { pm = 12; py--; }
         return `${py}-${String(pm).padStart(2, '0')}`;
       })();
-      const prevCache = CacheService.getScriptCache().get(`data_v2_${prevMes}`);
+      const prevCache = CacheService.getScriptCache().get(`data_v2_${_cacheVersion_()}_${prevMes}`);
       const prevData = prevCache ? JSON.parse(prevCache) : null;
       if (prevData && prevData.byCat) {
         Object.entries(byCat).forEach(([cat, val]) => {
@@ -567,6 +708,16 @@ function getDataAPI(mesFiltro) {
       insightsAI = ['No se pudieron generar insights de IA.'];
     }
 
+    // Meses que tienen movimientos (para avisar si el mes filtrado está vacío
+    // pero hay datos en otros meses, y ofrecer saltar al más reciente).
+    const mesesConDatos = {};
+    txns.forEach(r => {
+      if (r.date instanceof Date && !isNaN(r.date)) {
+        const k = fmtDate_(r.date, 'yyyy-MM');
+        mesesConDatos[k] = (mesesConDatos[k] || 0) + 1;
+      }
+    });
+
     const resp = {
       mes,
       kpis: {
@@ -578,6 +729,7 @@ function getDataAPI(mesFiltro) {
         inversiones: invData.totalMercado,
         txnCount:   mesTxn.length
       },
+      mesesConDatos,
       byCat,
       topGastos,
       historial,
@@ -606,13 +758,211 @@ function getDataAPI(mesFiltro) {
       },
       meta: { baseCur, generatedAt: new Date().toISOString() },
       insightsAI
+      // _debug se omite del payload de producción: es pesado y hacía que la
+      // respuesta superara el límite de caché (90KB) → nunca se cacheaba → lento.
     };
 
-    CacheService.getScriptCache().put(cacheKey, JSON.stringify(resp), CFG.CACHE_TTL);
-    return resp;
+    // CRÍTICO: google.script.run devuelve null al cliente si el objeto contiene
+    // valores no serializables (NaN, Infinity, undefined, Date crudo, funciones).
+    // Eso provocaba "Sin datos del servidor" pese a que getDataAPI sí calculaba
+    // bien (se veía en el editor). Saneamos SIEMPRE antes de devolver/cachear.
+    const safe = _sanitizeForClient_(resp);
+    _cachePutSafe_(cacheKey, safe, CFG.CACHE_TTL);
+    return safe;
 
   } catch(err) {
     Logger.log('❌ getDataAPI: ' + err + '\n' + err.stack);
+    return { error: 'getDataAPI: ' + (err.message || err), mes: mes, kpis: {} };
+  }
+}
+
+/**
+ * Convierte un objeto en 100% serializable por google.script.run:
+ * - NaN / Infinity / -Infinity  → 0
+ * - undefined                   → null
+ * - Date                        → ISO string
+ * - funciones                   → se omiten
+ * Recorre recursivamente objetos y arrays. Protege contra ciclos por profundidad.
+ */
+function _sanitizeForClient_(value, depth) {
+  depth = depth || 0;
+  if (depth > 12) return null; // corta estructuras demasiado profundas/circulares
+  if (value === undefined) return null;
+  if (value === null) return null;
+  const t = typeof value;
+  if (t === 'number') return isFinite(value) ? value : 0;
+  if (t === 'string' || t === 'boolean') return value;
+  if (t === 'function') return undefined; // se descarta al reconstruir
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    return value.map(function (v) { return _sanitizeForClient_(v, depth + 1); });
+  }
+  if (t === 'object') {
+    const out = {};
+    for (const k in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, k)) continue;
+      const clean = _sanitizeForClient_(value[k], depth + 1);
+      if (clean !== undefined) out[k] = clean;
+    }
+    return out;
+  }
+  return null;
+}
+
+/**
+ * Guarda en caché sólo si cabe en el límite de 100KB por clave de Apps Script.
+ * Si el payload es más grande, NO cachea (mejor recalcular que fallar en
+ * silencio, que era la causa de "a veces cargan los datos y a veces no").
+ */
+function _cachePutSafe_(key, obj, ttl) {
+  try {
+    const str = JSON.stringify(obj);
+    // El límite de Apps Script es 100KB por clave, medido en BYTES (no chars).
+    // El español tiene acentos/emojis que ocupan >1 byte, así que medimos bytes
+    // reales y dejamos margen (90KB) para no guardar nunca un valor corrupto,
+    // que era la causa de "recargo dos veces y se va a $0".
+    const bytes = Utilities.newBlob(str).getBytes().length;
+    if (bytes > 90000) {
+      Logger.log('⚠️ Cache OMITIDO (' + bytes + ' bytes > 90KB): ' + key + ' — se recalculará cada vez (correcto pero más lento).');
+      return false;
+    }
+    CacheService.getScriptCache().put(key, str, ttl || CFG.CACHE_TTL);
+    return true;
+  } catch(e) {
+    Logger.log('Error _cachePutSafe_ (' + key + '): ' + e.message);
+    return false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// API LIGERA — solo KPIs + historial reciente (sin series ni inversiones)
+// Usada para refrescos rápidos después de guardar/editar movimientos
+// ═══════════════════════════════════════════════════════
+function getDataAPILight(mesFiltro) {
+  const tz  = CFG.TZ;
+  const hoy = new Date();
+  const mes = mesFiltro || fmtDate_(hoy, 'yyyy-MM');
+
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const shMov = ss.getSheetByName(CFG.SHEETS.MOV);
+    const shCtas= ss.getSheetByName(CFG.SHEETS.CUENTAS);
+    const shCat = ss.getSheetByName(CFG.SHEETS.CATEGORIAS);
+    const shCfg = ss.getSheetByName(CFG.SHEETS.CONFIG);
+    const shCor = ss.getSheetByName(CFG.SHEETS.CORREOS);
+
+    const baseCur = String(getSettingEs_(shCfg, 'moneda_base', 'COP') || 'COP');
+    const movsRaw = shMov ? readSheet_(shMov) : [];
+
+    const txns = movsRaw.map(m => {
+      const fecha = parseSheetDate_(m.fecha);
+      const rawGroup = normalizeType_(m.grupo || m.tipo || m.type || '');
+      const category = String(m.categoría || m.categoria || m.category || 'Otros').trim();
+      const monto = parseNum_(m.monto || m.amount || m.valor || 0);
+      const knownTypesL = ['income','expense','transfer','investment'];
+      let resolvedTypeL = rawGroup;
+      if (!knownTypesL.includes(resolvedTypeL)) {
+        const catLow = category.toLowerCase();
+        if (['ingresos','ingreso','nómina','nomina','salario'].some(k => catLow.includes(k))) resolvedTypeL = 'income';
+        else if (['transferencia','traslado','nequi','daviplata'].some(k => catLow.includes(k))) resolvedTypeL = 'transfer';
+        else resolvedTypeL = monto >= 0 ? 'income' : 'expense';
+      }
+      return {
+        date: fecha,
+        type: resolvedTypeL,
+        category,
+        amount_base: Math.abs(monto),
+        currency: String(m.moneda || baseCur),
+        description: String(m.descripción || m.descripcion || '').trim(),
+        account: String(m.cuenta_origen || m.cuenta || '').trim(),
+        notas: String(m.notas || ''),
+        referencia: String(m.referencia || ''),
+        txn_id: m.mov_id,
+        source: String(m.fuente || 'manual'),
+        cuenta_destino: String(m.cuenta_destino || '')
+      };
+    });
+
+    const mesTxn = txns.filter(r => r.date instanceof Date && fmtDate_(r.date, 'yyyy-MM') === mes);
+    const income  = mesTxn.filter(r => normalizeType_(r.type) === 'income').reduce((s, r) => s + r.amount_base, 0);
+    const expenseOnly = mesTxn.filter(r => normalizeType_(r.type) === 'expense').reduce((s, r) => s + r.amount_base, 0);
+    const investments = mesTxn.filter(r => normalizeType_(r.type) === 'investment').reduce((s, r) => s + r.amount_base, 0);
+    const expense = expenseOnly + investments;
+
+    const byCat = {};
+    mesTxn.filter(r => ['expense','investment'].includes(normalizeType_(r.type))).forEach(r => {
+      const t = normalizeType_(r.type);
+      const c = t === 'investment' ? (String(r.category || '').trim() || 'Inversiones') : r.category;
+      byCat[c] = (byCat[c] || 0) + r.amount_base;
+    });
+
+    const cuentas = shCtas ? readSheet_(shCtas).filter(r => r.activa !== false && String(r.activa) !== 'false') : [];
+    const efectivo = cuentas.reduce((s, r) => s + parseNum_(r.saldo), 0);
+    const acSaldos = cuentas.map(r => ({
+      name: String(r.nombre || '').trim(),
+      bal: parseNum_(r.saldo),
+      type: r.tipo
+    }));
+
+    const emailPending = shCor ? readSheet_(shCor).filter(r => String(r.estado) === 'pendiente').length : 0;
+
+    const historial = txns
+      .filter(r => r.date instanceof Date)
+      .sort((a, b) => b.date - a.date)
+      .slice(0, 150)
+      .map(r => ({
+        id: r.txn_id,
+        fecha: fmtDate_(r.date, 'dd/MM/yyyy'),
+        mes: fmtDate_(r.date, 'yyyy-MM'),
+        type: normalizeType_(r.type),
+        cat: r.category,
+        desc: r.description,
+        monto: r.amount_base,
+        moneda: r.currency,
+        cuenta: r.account,
+        cuentaDestino: r.cuenta_destino,
+        source: r.source,
+        status: 'confirmed',
+        notas: r.notas,
+        referencia: r.referencia
+      }));
+
+    const cats = shCat ? readSheet_(shCat).map(r => ({
+      id: r.categoria_id, name: r.nombre, type: r.grupo, icon: r.icono
+    })) : [];
+
+    const budget = buildBudget_(ss, mes, txns, tz);
+
+    return _sanitizeForClient_({
+      __light: true,
+      mes,
+      kpis: {
+        income, expense,
+        savings: income - expense,
+        burnRate: income > 0 ? expense / income * 100 : 0,
+        totalNeto: efectivo,
+        efectivo,
+        inversiones: 0,
+        txnCount: mesTxn.length
+      },
+      byCat,
+      topGastos: Object.entries(byCat).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([cat,val])=>({cat,val})),
+      historial,
+      budget,
+      accounts: acSaldos,
+      inversiones: [],
+      combos: {
+        cuentas: acSaldos.map(a => a.name),
+        categorias: cats.map(c => `${c.icon||''} ${c.name}`.trim()),
+        categoriasRaw: cats
+      },
+      emailPending,
+      meta: { baseCur, generatedAt: new Date().toISOString() }
+    });
+  } catch(err) {
+    Logger.log('❌ getDataAPILight: ' + err);
     return { error: err.message, mes };
   }
 }
@@ -667,7 +1017,7 @@ function guardarTransaccion(form) {
   const nextRow = nextEmpty_(sh, 2);
   sh.getRange(nextRow, 1, 1, row.length).setValues([row]);
 
-  syncAccountBalances_(ss);
+  syncAccountBalances_(ss, null, true);
   clearCacheForMonth();
   return { ok: true, id: row[0] };
 }
@@ -685,7 +1035,7 @@ function eliminarTransaccion(txnId) {
   for (let r = 1; r < data.length; r++) {
     if (String(data[r][hdr.mov_id] ?? '') === txnId) {
       sh.deleteRow(r + 1);
-      syncAccountBalances_(ss);
+      syncAccountBalances_(ss, null, true);
       clearCacheForMonth();
       return { ok: true };
     }
@@ -755,8 +1105,7 @@ function syncGmailLabel_(labelName) {
           Utilities.getUuid(), msgId,                              // log_id, msg_id
           msg.getFrom(), msg.getSubject(),                         // remitente, asunto
           msg.getDate(), null,                                     // recibido_el, procesado_el
-          ai.confidence >= parseFloat(getSettingEs_(shCfg, 'umbral_auto_aprobacion', '0.88'))
-            ? 'auto_aprobado' : 'pendiente',                      // estado
+          'pendiente',                                             // estado — siempre pendiente, usuario aprueba manualmente
           amount, cur, merchant,                                   // monto, moneda, comercio
           ai.category, ai.confidence,                              // categoria_ia, confianza_ia
           '', '',                                                  // categoria_usuario, cuenta_sugerida
@@ -1049,6 +1398,79 @@ function setupTriggers() {
 function syncGmailLabelAuto() { syncGmailLabel_(CFG.GMAIL_LABEL); }
 function actualizarPreciosInversionesAuto() { actualizarPreciosInversiones(); }
 
+// ── Wrapper públicos para el frontend (google.script.run) ──────────────
+function getAlertasActivasUI() { return getAlertasActivas(); }
+function chatFinancieroUI(pregunta, historial) { return chatFinanciero(pregunta, historial || []); }
+function getTrucosFinancierosUI() { return getTrucosFinancieros(); }
+function categorizarMovimientosUI() { return categorizarMovimientosSinCategoria(); }
+function proyectarSaldoUI() { return proyectarSaldoFinMes(); }
+function procesarPDFUI(params) { return procesarExtractoPDF(params); }
+function getHistorialExtractosUI(limite) {
+  try { return getHistorialExtractos(limite || 20); }
+  catch(e) { Logger.log('getHistorialExtractosUI error: ' + e.message + ' | ' + e.stack); throw e; }
+}
+
+function debugHistorialUI() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var hojas = ss.getSheets();
+    var nombres = [];
+    for (var i = 0; i < hojas.length; i++) nombres.push(hojas[i].getName());
+    var sh = ss.getSheetByName('Historial_Extractos');
+    if (!sh) return 'SIN HOJA. Hojas existentes: ' + nombres.join(', ');
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return 'HOJA VACIA. Filas: ' + lastRow;
+    var data = sh.getDataRange().getValues();
+    var headers = String(data[0]);
+    var fila1 = '';
+    for (var j = 0; j < data[1].length; j++) {
+      var v = data[1][j];
+      fila1 += j + ':' + (v instanceof Date ? 'DATE=' + v.toISOString() : typeof v + '=' + String(v).slice(0,30)) + ' | ';
+    }
+    return 'OK. Filas=' + (lastRow-1) + ' | Headers: ' + headers + ' | Fila1: ' + fila1;
+  } catch(e) {
+    return 'EXCEPCION: ' + e.message;
+  }
+}
+function marcarMovimientoConciliadoUI(movId, stmtId, estado) { return marcarMovimientoConciliado(movId, stmtId, estado); }
+function actualizarEstadoHistorialUI(stmtId, estado) { return actualizarEstadoHistorialExtracto(stmtId, estado); }
+function eliminarHistorialExtractoUI(stmtId) { return eliminarHistorialExtracto(stmtId); }
+function limpiarDuplicadosHistorialUI() { return limpiarDuplicadosHistorial_(); }
+function cargarReviewExtractoUI(stmtId) { return cargarReviewExtracto(stmtId); }
+function actualizarReviewExtractoUI(stmtId, reviewJson) { return actualizarReviewExtracto_(stmtId, reviewJson); }
+
+// Marcar múltiples movimientos como conciliados en una sola llamada
+function marcarMovimientosBatchUI(movIds, stmtId, estado) {
+  if (!Array.isArray(movIds)) return { ok: false, error: 'movIds debe ser array' };
+  let ok = 0;
+  movIds.forEach(id => {
+    try { marcarMovimientoConciliado(id, stmtId, estado); ok++; } catch(e) {}
+  });
+  return { ok: true, marcados: ok };
+}
+
+// Guardar múltiples transacciones en una sola llamada (para importar faltantes en batch)
+function guardarTransaccionesBatchUI(txns) {
+  if (!Array.isArray(txns)) return { ok: false, error: 'txns debe ser array' };
+  const resultados = [];
+  txns.forEach(form => {
+    try {
+      const r = guardarTransaccion(form);
+      resultados.push({ ok: true, id: r.id || '', idx: form._idx });
+    } catch(e) {
+      resultados.push({ ok: false, error: e.message, idx: form._idx });
+    }
+  });
+  clearCacheForMonth();
+  return { ok: true, resultados };
+}
+
+function setupAllTriggers() {
+  setupTriggers();
+  setupAlertasTrigger();
+  Logger.log('✅ Todos los triggers configurados');
+}
+
 // ═══════════════════════════════════════════════════════
 // ATAJOS DE IPHONE — Handlers del doPost
 // ═══════════════════════════════════════════════════════
@@ -1313,7 +1735,7 @@ function actualizarFX() {
 // ═══════════════════════════════════════════════════════
 function recalcularSaldos() {
   try {
-    syncAccountBalances_(SpreadsheetApp.getActiveSpreadsheet());
+    syncAccountBalances_(SpreadsheetApp.getActiveSpreadsheet(), null, true);
     clearCacheForMonth();
     return { ok: true };
   } catch(e) {
@@ -1402,7 +1824,7 @@ function guardarCuenta(form) {
       sh.getRange(row, hdr.moneda + 1).setValue(String(form.moneda || 'COP'));
       if (form.saldo != null) sh.getRange(row, hdr.saldo + 1).setValue(parseNum_(form.saldo));
       sh.getRange(row, hdr.activa + 1).setValue(form.activa !== false);
-      syncAccountBalances_(ss);
+      syncAccountBalances_(ss, null, true);
       clearCacheForMonth();
       return { ok: true, action: 'updated' };
     }
@@ -1517,15 +1939,6 @@ function normalizeKey_(value) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, '_')
     .replace(/[^a-z0-9_]/g, '');
-}
-
-function getSetting_(sh, key, def) {
-  if (!sh) return def;
-  const data = sh.getDataRange().getValues();
-  for (let r = 1; r < data.length; r++) {
-    if (String(data[r][0]||'').trim() === key) return data[r][1] ?? def;
-  }
-  return def;
 }
 
 function getSettingEs_(shCfg, clave, def) {
@@ -1671,7 +2084,7 @@ function cargarDatosDemo_() {
   }
 
   // ── Recalcular saldos desde los movimientos recién cargados ──
-  try { syncAccountBalances_(ss); } catch(e) { Logger.log('syncBalance demo: ' + e); }
+  try { syncAccountBalances_(ss, null, true); } catch(e) { Logger.log('syncBalance demo: ' + e); }
 }
 
 function normalizeType_(t) {
@@ -1724,15 +2137,30 @@ function normalizeGroupLabel_(value) {
   return 'gasto';
 }
 
-function syncAccountBalances_(ss, mes) {
+/**
+ * Calcula los saldos por cuenta a partir de los movimientos.
+ *
+ * IMPORTANTE: por defecto NO escribe en la hoja (persist=false). Antes esta
+ * función hacía hasta 3 setValue por cuenta EN CADA carga del dashboard, y si
+ * una recarga se interrumpía o pisaba a otra, dejaba saldos corruptos (a veces
+ * 0). Eso causaba el síntoma "recargo dos veces y se va a $0". Ahora el
+ * dashboard sólo LEE; la escritura se hace explícitamente (persist=true) desde
+ * acciones puntuales, no en cada render.
+ *
+ * @param {Spreadsheet} ss
+ * @param {string} mes
+ * @param {boolean} [persist=false] Si true, escribe los saldos calculados.
+ */
+function syncAccountBalances_(ss, mes, persist) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet();
   const shMov = spreadsheet.getSheetByName(CFG.SHEETS.MOV);
   const shAcc = spreadsheet.getSheetByName(CFG.SHEETS.CUENTAS);
   if (!shMov || !shAcc) return { byAccountMonth: {} };
 
-  const baseCol = ensureColumn_(shAcc, 'saldo_inicial');
-  const deltaCol = ensureColumn_(shAcc, 'variacion_mes');
-  const syncCol = ensureColumn_(shAcc, 'actualizado_el');
+  // Sólo aseguramos columnas cuando vamos a escribir (ensureColumn_ muta la hoja).
+  const baseCol  = persist ? ensureColumn_(shAcc, 'saldo_inicial') : _colIndex_(shAcc, 'saldo_inicial');
+  const deltaCol = persist ? ensureColumn_(shAcc, 'variacion_mes') : _colIndex_(shAcc, 'variacion_mes');
+  const syncCol  = persist ? ensureColumn_(shAcc, 'actualizado_el') : _colIndex_(shAcc, 'actualizado_el');
 
   const accData = shAcc.getDataRange().getValues();
   const hdrAcc = rowToObj_(accData[0]);
@@ -1745,13 +2173,16 @@ function syncAccountBalances_(ss, mes) {
     const name = String(accData[r][hdrAcc.nombre] || '').trim();
     if (!name) continue;
     rowByAcc[name] = r + 1;
-    const currentBase = parseNum_(accData[r][baseCol]);
-    if (!currentBase && accData[r][baseCol] === '' && hdrAcc.saldo != null) {
+    const currentBase = baseCol != null ? parseNum_(accData[r][baseCol]) : 0;
+    if (baseCol != null && !currentBase && accData[r][baseCol] === '' && hdrAcc.saldo != null) {
       const seed = parseNum_(accData[r][hdrAcc.saldo]);
-      shAcc.getRange(r + 1, baseCol + 1).setValue(seed);
+      if (persist) shAcc.getRange(r + 1, baseCol + 1).setValue(seed);
       baseByAcc[name] = seed;
-    } else {
+    } else if (baseCol != null) {
       baseByAcc[name] = currentBase;
+    } else {
+      // Sin columna saldo_inicial: usar el saldo actual como base.
+      baseByAcc[name] = hdrAcc.saldo != null ? parseNum_(accData[r][hdrAcc.saldo]) : 0;
     }
   }
 
@@ -1768,8 +2199,17 @@ function syncAccountBalances_(ss, mes) {
   };
 
   txns.forEach(txn => {
-    const type = normalizeType_(txn.grupo);
-    const amount = Math.abs(parseNum_(txn.monto));
+    const rawMonto = parseNum_(txn.monto || txn.amount || 0);
+    const rawType = normalizeType_(txn.grupo || txn.tipo || txn.type || '');
+    const knownT = ['income','expense','transfer','investment'];
+    const catT = String(txn.categoría || txn.categoria || '').toLowerCase();
+    let type = rawType;
+    if (!knownT.includes(type)) {
+      if (['ingresos','ingreso','nomina','salario'].some(k => catT.includes(k))) type = 'income';
+      else if (['transferencia','traslado'].some(k => catT.includes(k))) type = 'transfer';
+      else type = rawMonto >= 0 ? 'income' : 'expense';
+    }
+    const amount = Math.abs(rawMonto);
     const origin = String(txn.cuenta_origen || txn.cuenta || '').trim();
     const dest = String(txn.cuenta_destino || '').trim();
     const date = parseSheetDate_(txn.fecha);
@@ -1789,15 +2229,43 @@ function syncAccountBalances_(ss, mes) {
     }
   });
 
+  const balances = {};
   Object.keys(rowByAcc).forEach(name => {
-    const row = rowByAcc[name];
     const newBalance = (baseByAcc[name] || 0) + (totals[name] || 0);
-    shAcc.getRange(row, hdrAcc.saldo + 1).setValue(newBalance);
-    if (deltaCol != null) shAcc.getRange(row, deltaCol + 1).setValue((monthly[name] && monthly[name].net) || 0);
-    if (syncCol != null) shAcc.getRange(row, syncCol + 1).setValue(new Date());
+    balances[name] = newBalance;
+    if (persist) {
+      const row = rowByAcc[name];
+      if (hdrAcc.saldo != null) shAcc.getRange(row, hdrAcc.saldo + 1).setValue(newBalance);
+      if (deltaCol != null) shAcc.getRange(row, deltaCol + 1).setValue((monthly[name] && monthly[name].net) || 0);
+      if (syncCol != null) shAcc.getRange(row, syncCol + 1).setValue(new Date());
+    }
   });
 
-  return { byAccountMonth: monthly };
+  return { byAccountMonth: monthly, balances: balances };
+}
+
+/**
+ * Índice (0-based) de una columna por nombre normalizado, o null si no existe.
+ * No muta la hoja (a diferencia de ensureColumn_).
+ */
+function _colIndex_(sh, headerName) {
+  if (!sh || sh.getLastColumn() < 1) return null;
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const map = rowToObj_(headers);
+  const key = normalizeKey_(headerName);
+  return map[key] != null ? map[key] : null;
+}
+
+/**
+ * Persiste los saldos calculados en la hoja Cuentas. Llamar SOLO desde acciones
+ * explícitas (registrar/editar/eliminar movimiento, cierre de mes), nunca en
+ * cada render del dashboard.
+ */
+function persistirSaldosCuentas(mes) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const r = syncAccountBalances_(ss, mes, true);
+  clearCacheForMonth();
+  return { ok: true, balances: r.balances || {} };
 }
 
 function nextEmpty_(sh, startRow) {
@@ -2460,11 +2928,142 @@ function extractMerchant_(from, subject) {
 }
 
 // ═══════════════════════════════════════════════════════
+// DIAGNÓSTICO — por qué el dashboard sale vacío ($0 / sin gráficas)
+// ═══════════════════════════════════════════════════════
+/**
+ * Reporta el estado real de cada hoja y del dataset. Llamable desde la UI.
+ * Sirve para saber si el problema es "hojas vacías", "hoja mal nombrada" o
+ * "error de lectura", en vez de mostrar $0 en silencio.
+ */
+function diagnosticarDatos() {
+  const out = { ok: true, hojas: {}, problemas: [], resumen: {} };
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    out.spreadsheet = { nombre: ss.getName(), id: ss.getId() };
+
+    const existentes = ss.getSheets().map(s => s.getName());
+    out.hojasExistentes = existentes;
+
+    Object.keys(CFG.SHEETS).forEach(k => {
+      const nombre = CFG.SHEETS[k];
+      const sh = ss.getSheetByName(nombre);
+      if (!sh) {
+        out.hojas[nombre] = { existe: false, filas: 0 };
+        out.problemas.push('Falta la hoja "' + nombre + '"');
+        return;
+      }
+      const filas = Math.max(0, sh.getLastRow() - 1); // sin encabezado
+      const headers = sh.getLastColumn() > 0
+        ? sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(h => String(h).trim())
+        : [];
+      out.hojas[nombre] = { existe: true, filas: filas, columnas: headers };
+    });
+
+    const movs = readSheet_(ss.getSheetByName(CFG.SHEETS.MOV));
+    const ctas = readSheet_(ss.getSheetByName(CFG.SHEETS.CUENTAS));
+    out.resumen.movimientos = movs.length;
+    out.resumen.cuentas = ctas.length;
+
+    if (movs.length === 0) out.problemas.push('La hoja Movimientos no tiene datos → dashboard en $0. Usa "Cargar datos de ejemplo" o registra un movimiento.');
+    if (ctas.length === 0) out.problemas.push('La hoja Cuentas no tiene cuentas → Capital total $0.');
+
+    // ¿Qué meses tienen movimientos? (ayuda si el filtro está en un mes sin datos)
+    const meses = {};
+    movs.forEach(m => {
+      const f = parseSheetDate_(m.fecha);
+      if (f instanceof Date && !isNaN(f)) {
+        const key = fmtDate_(f, 'yyyy-MM');
+        meses[key] = (meses[key] || 0) + 1;
+      }
+    });
+    out.resumen.mesesConDatos = meses;
+    out.resumen.mesActual = fmtDate_(new Date(), 'yyyy-MM');
+    if (movs.length > 0 && !meses[out.resumen.mesActual]) {
+      out.problemas.push('Hay movimientos pero NINGUNO en el mes actual (' + out.resumen.mesActual + '). El dashboard filtra por mes: cambia el selector de mes/año a uno con datos: ' + Object.keys(meses).join(', '));
+    }
+
+    out.ok = out.problemas.length === 0;
+  } catch (e) {
+    out.ok = false;
+    out.error = String(e);
+    out.stack = String(e.stack || '');
+  }
+  return _sanitizeForClient_(out);
+}
+
+/**
+ * EJECUTAR DESDE EL EDITOR de Apps Script (selecciona esta función y ▷ Ejecutar).
+ * Imprime en el Registro de ejecución el diagnóstico completo Y el resultado
+ * real de getDataAPI, capturando cualquier error con su stack. Sirve para ver
+ * exactamente por qué el dashboard sale vacío.
+ */
+function DEBUG_dashboard() {
+  Logger.log('======== DIAGNÓSTICO DE DATOS ========');
+  var diag = diagnosticarDatos();
+  Logger.log(JSON.stringify(diag, null, 2));
+
+  Logger.log('======== PRUEBA getDataAPI (mes actual) ========');
+  try {
+    var mes = fmtDate_(new Date(), 'yyyy-MM');
+    var d = getDataAPI(mes);
+    if (d && d.error) {
+      Logger.log('getDataAPI DEVOLVIÓ ERROR: ' + d.error);
+    } else if (!d) {
+      Logger.log('getDataAPI DEVOLVIÓ null/undefined');
+    } else {
+      Logger.log('getDataAPI OK. KPIs: ' + JSON.stringify(d.kpis));
+      Logger.log('Movimientos en historial: ' + ((d.historial || []).length));
+      Logger.log('Cuentas: ' + ((d.accounts || []).length));
+      Logger.log('Categorías con gasto: ' + Object.keys(d.byCat || {}).length);
+    }
+  } catch (e) {
+    Logger.log('getDataAPI LANZÓ EXCEPCIÓN: ' + e + '\n' + (e.stack || ''));
+  }
+  Logger.log('======== FIN ========');
+  return diag;
+}
+
+/**
+ * Auto-reparación: si Movimientos está vacía, carga datos de ejemplo para que
+ * el dashboard y las gráficas se vean. Devuelve el diagnóstico actualizado.
+ */
+function cargarDatosDeEjemplo() {
+  try {
+    // Asegurar estructura de hojas antes de sembrar.
+    if (typeof inicializarProyecto === 'function') {
+      try { inicializarProyecto({ demo: false }); } catch (e) { Logger.log('init: ' + e); }
+    }
+    cargarDatosDemo_();
+    clearCacheForMonth();
+    return { ok: true, diagnostico: diagnosticarDatos() };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+// ═══════════════════════════════════════════════════════
 // CACHE HELPERS
 // ═══════════════════════════════════════════════════════
+/**
+ * Token de versión del caché de datos. Va incluido en cada clave de caché de
+ * datos (data_v2, dataLight, etc.). Para invalidar TODO el caché de datos sin
+ * tener que enumerar las claves (removeAll requiere un array de claves, no se
+ * puede vaciar todo), basta con incrementar este token: las claves viejas
+ * quedan inalcanzables al instante.
+ */
+function _cacheVersion_() {
+  try {
+    return PropertiesService.getScriptProperties().getProperty('CACHE_VER') || '0';
+  } catch(e) {
+    return '0';
+  }
+}
+
 function clearCacheForMonth() {
   try {
-    CacheService.getScriptCache().removeAll();
+    const props = PropertiesService.getScriptProperties();
+    const next = (parseInt(props.getProperty('CACHE_VER') || '0', 10) + 1) % 1000000;
+    props.setProperty('CACHE_VER', String(next));
   } catch(e) {
     Logger.log('Error limpiando cache: ' + e.message);
   }
@@ -2500,7 +3099,9 @@ function editarMovimiento(id, changes) {
     if (changes.cuenta      != null) sh.getRange(row, hdr.cuenta_origen+1).setValue(changes.cuenta);
     if (changes.cuentaDestino != null && hdr.cuenta_destino != null) sh.getRange(row, hdr.cuenta_destino+1).setValue(changes.cuentaDestino);
     if (changes.notas       != null) sh.getRange(row, hdr.notas+1).setValue(changes.notas);
-    syncAccountBalances_(ss);
+    syncAccountBalances_(ss, null, true);
+    // Si corregiste la categoría, el clasificador aprendido debe reaprender.
+    if (changes.categoria != null && typeof _lcInvalidate_ === 'function') _lcInvalidate_();
     clearCacheForMonth();
     return { ok: true };
   }
@@ -2879,22 +3480,9 @@ function loadBudgetTemplate() {
 }
 
 // ═══════════════════════════════════════════════════════
-// GEMINI API KEY — guardar y verificar
+// (La gestión de la clave de IA se movió a AIProvider.js:
+//  guardarGeminiApiKey / getGeminiKeyStatus / probarClaveIA)
 // ═══════════════════════════════════════════════════════
-function guardarGeminiApiKey(key) {
-  const k = String(key || '').trim();
-  if (!k) throw new Error('API key vacía');
-  PropertiesService.getScriptProperties().setProperty('GEMINI_API_KEY', k);
-  return { ok: true };
-}
-
-function getGeminiKeyStatus() {
-  const k = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || '';
-  return {
-    configured: !!k,
-    masked: k ? k.slice(0, 4) + '••••••••' + k.slice(-4) : ''
-  };
-}
 
 // ═══════════════════════════════════════════════════════
 // RECONCILIACIÓN DE SALDOS — CIERRE DE MES
@@ -2907,7 +3495,7 @@ function obtenerSaldosParaReconciliar(mes) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(CFG.SHEETS.CUENTAS);
   if (!sh) throw new Error('Hoja Cuentas no existe');
-  syncAccountBalances_(ss);
+  syncAccountBalances_(ss, null, true);
   const cuentas = readSheet_(sh)
     .filter(r => r.activa !== false && String(r.activa) !== 'false' && r.nombre)
     .map(r => ({
@@ -2939,7 +3527,7 @@ function reconciliarSaldosMes(ajustes) {
   const shCfg   = ss.getSheetByName(CFG.SHEETS.CONFIG);
   const baseCur = String(getSettingEs_(shCfg, 'moneda_base', 'COP') || 'COP');
 
-  syncAccountBalances_(ss);
+  syncAccountBalances_(ss, null, true);
 
   const cuentasMap = {};
   readSheet_(shCtas).forEach(r => {
@@ -2993,7 +3581,7 @@ function reconciliarSaldosMes(ajustes) {
     });
   }
 
-  syncAccountBalances_(ss);
+  syncAccountBalances_(ss, null, true);
   clearCacheForMonth();
   return { ok: true, ajustes: realizados, total: realizados.length, mes };
 }
@@ -3017,7 +3605,7 @@ function setPrecioAutoMode(enabled) {
 // CHATBOT FINANCIERO — powered by Gemini
 // ═══════════════════════════════════════════════════════
 function chatbotQuery(message, mes) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const apiKey = _aiApiKey_();
   if (!apiKey) {
     return { ok: false, reply: '⚙️ Para usar el asistente, configura tu API key de Gemini en **Ajustes → Integración IA**. Es gratuita en aistudio.google.com' };
   }
@@ -3047,7 +3635,6 @@ Responde SIEMPRE en español, de forma concisa (máx 3 párrafos). Usa los datos
   }
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
     const payload = {
       contents: [
         {
@@ -3057,22 +3644,15 @@ Responde SIEMPRE en español, de forma concisa (máx 3 párrafos). Usa los datos
         }
       ]
     };
-    const options = {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload)
-    };
-    try {
-      const response = UrlFetchApp.fetch(url, options);
-      const json = JSON.parse(response.getContentText());
-      const texto = json.candidates?.[0]?.content?.parts?.[0]?.text || 'Sin respuesta';
-      return { ok: true, reply: texto.trim() };
-    } catch (e) {
-      Logger.log('❌ ERROR Gemini: ' + e);
-      return { ok: false, reply: '❌ Error conectando con Gemini: ' + e };
+    const r = aiGenerateContent_(AI_CFG.MODEL, payload, apiKey);
+    if (r.code !== 200) {
+      Logger.log('❌ ERROR IA HTTP ' + r.code + ': ' + r.raw);
+      return { ok: false, reply: '❌ Error conectando con la IA (HTTP ' + r.code + '). Verifica tu API Key en Ajustes.' };
     }
+    const texto = r.text || 'Sin respuesta';
+    return { ok: true, reply: texto.trim() };
   } catch(e) {
     Logger.log('chatbotQuery error: ' + e);
-    return { ok: false, reply: 'Error al llamar a Gemini: ' + e.message };
+    return { ok: false, reply: 'Error al llamar a la IA: ' + e.message };
   }
 }
