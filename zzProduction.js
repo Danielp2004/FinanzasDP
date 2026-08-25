@@ -87,6 +87,25 @@ function assertAuthorizedApiRequest_(action, body, e) {
   }
 }
 
+/**
+ * Genera y guarda una SHORTCUTS_API_KEY nueva si no existe todavía.
+ * No sobreescribe una clave ya configurada — para rotarla, bórrala antes
+ * desde Propiedades del script. Pensada para invocarse una sola vez vía
+ * `clasp run generarApiKeySiNoExiste_`.
+ * @returns {{ok:boolean, created:boolean, masked:string}}
+ */
+function generarApiKeySiNoExiste_() {
+  const props = PropertiesService.getScriptProperties();
+  const existing = String(props.getProperty('SHORTCUTS_API_KEY') || '').trim();
+  if (existing) {
+    return { ok: true, created: false, key: existing };
+  }
+  const key = Utilities.getUuid().replace(/-/g, '');
+  props.setProperty('SHORTCUTS_API_KEY', key);
+  Logger.log('SHORTCUTS_API_KEY generada: ' + key);
+  return { ok: true, created: true, key: key };
+}
+
 function getApiStatus_() {
   const configuredKey = String(PropertiesService.getScriptProperties().getProperty('SHORTCUTS_API_KEY') || '').trim();
   return {

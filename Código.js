@@ -327,6 +327,18 @@ function inicializarProyecto(opts) {
 // WEB APP ENTRY POINTS
 // ═══════════════════════════════════════════════════════
 function doGet(e) {
+  // ?setup_key=1 → genera SHORTCUTS_API_KEY una sola vez (si no existe ya)
+  // y la muestra en pantalla. Sólo funciona mientras la clave no exista;
+  // una vez creada, esta ruta deja de servir para nada (no es puerta trasera).
+  if (e && e.parameter && e.parameter.setup_key === '1') {
+    const r = generarApiKeySiNoExiste_();
+    const msg = r.created
+      ? `Clave generada:<br><b style="font-size:18px;user-select:all">${r.key}</b><br><br>Cópiala y pégala en la configuración de la PWA. Esta página deja de mostrarla después de refrescar.`
+      : `Ya existía una clave configurada. Por seguridad esta ruta no la muestra de nuevo; revísala en Propiedades del script.`;
+    return HtmlService.createHtmlOutput(
+      `<div style="font-family:sans-serif;padding:24px;max-width:480px">${msg}</div>`
+    );
+  }
   // ?diag=1  → página de diagnóstico mínima (sin Chart.js, sin app.html)
   if (e && e.parameter && e.parameter.diag === '1') {
     return HtmlService.createHtmlOutputFromFile('Diag')
